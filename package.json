@@ -1,12 +1,12 @@
 {
   "name": "rampet-multi-server",
   "version": "1.0.0",
-  "description": "Servidor para enviar notificaciones push y WhatsApp",
-  "main": "index.js",
+  "description": "Servidor para enviar notificaciones y WhatsApp",
   "dependencies": {
     "googleapis": "^92.0.0",
     "whatsapp-web.js": "1.23.0",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "puppeteer": "^21.0.0"
   },
   "engines": {
     "node": "18.x"
