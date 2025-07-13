@@ -1,16 +1,16 @@
 {
   "name": "rampet-notification-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Servidor para enviar notificaciones push para RAMPET",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.17.1",
-    "googleapis": "^92.0.0",
     "body-parser": "^1.19.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "express": "^4.17.1",
+    "googleapis": "^92.0.0"
   },
   "engines": {
     "node": "18.x"
