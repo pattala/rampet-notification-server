@@ -1,14 +1,21 @@
 const express = require("express");
 const { google } = require("googleapis");
 const bodyParser = require("body-parser");
-const cors = require('cors'); // Importamos cors
+const cors = require('cors');
 const app = express();
 
-// Usamos cors para permitir peticiones desde cualquier origen
-// Esto es necesario para que tu panel de admin local pueda comunicarse con el servidor
-app.use(cors());
+// --- CONFIGURACIÓN DE CORS EXPLÍCITA ---
+// Esto le dice al servidor que acepte peticiones de cualquier origen.
+app.use(cors({
+  origin: '*'
+}));
 
-// Usamos bodyParser para poder leer el cuerpo de las peticiones POST
+// Esto maneja las peticiones 'preflight' que los navegadores envían
+// para comprobar los permisos antes de enviar la petición POST real.
+app.options('*', cors()); 
+// -----------------------------------------
+
+
 app.use(bodyParser.json());
 
 // La clave secreta NO se sube a GitHub. La leemos desde las variables de entorno de Render.
@@ -22,24 +29,18 @@ const jwtClient = new google.auth.JWT(
     ["https://www.googleapis.com/auth/firebase.messaging"]
 );
 
-// Esta es la única "puerta" o "endpoint" que nuestro servidor tendrá abierta.
-// Solo responde a peticiones POST a /send-notification
 app.post("/send-notification", async (req, res) => {
-    // Extraemos los datos que nos envía el panel de admin
     const { tokens, title, body } = req.body;
 
-    // Verificación básica de que los datos llegaron
     if (!tokens || !title || !body || tokens.length === 0) {
         return res.status(400).json({ error: "Faltan datos: tokens, title o body." });
     }
 
     try {
-        // Obtenemos un token de acceso de corta duración para autorizar la petición
         const accessToken = await jwtClient.getAccessToken();
         let successCount = 0;
         let failureCount = 0;
 
-        // Creamos una promesa para cada notificación que queremos enviar
         const sendPromises = tokens.map(token => {
              const message = {
                 message: {
@@ -48,7 +49,6 @@ app.post("/send-notification", async (req, res) => {
                 },
             };
             
-            // Hacemos la llamada a la API de Firebase Cloud Messaging (FCM)
             return fetch(`https://fcm.googleapis.com/v1/projects/sistema-fidelizacion/messages:send`, {
                 method: "POST",
                 headers: {
@@ -68,10 +68,7 @@ app.post("/send-notification", async (req, res) => {
             });
         });
 
-        // Esperamos a que todas las promesas de envío se completen
         await Promise.all(sendPromises);
-
-        // Devolvemos una respuesta exitosa al panel de admin
         console.log(`Envío completado. Éxitos: ${successCount}, Fallos: ${failureCount}`);
         res.json({ success: true, successCount, failureCount });
 
@@ -81,7 +78,6 @@ app.post("/send-notification", async (req, res) => {
     }
 });
 
-// Definimos el puerto en el que correrá el servidor
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
     console.log(`Servidor de notificaciones escuchando en el puerto ${port}`);
