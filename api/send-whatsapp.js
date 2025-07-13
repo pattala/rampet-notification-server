@@ -1,10 +1,8 @@
-// api/send-whatsapp.js (VERSIÓN FINAL Y ROBUSTA)
+// api/send-whatsapp.js (VERSIÓN FINAL CON RUTA /tmp)
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 
-// Usamos el objeto 'global' de Node.js para intentar persistir el cliente
-// entre invocaciones "calientes" de la función en Vercel.
 if (typeof global.waClient === 'undefined') {
     global.waClient = null;
     global.qrCodeData = null;
@@ -12,21 +10,23 @@ if (typeof global.waClient === 'undefined') {
 }
 
 const initializeClient = () => {
-    // Evita reinicializar si ya está en proceso o listo
     if (global.waClient || global.clientStatus === 'INITIALIZING') {
-        console.log('Inicialización ya en progreso o completada. Estado:', global.clientStatus);
         return;
     }
 
-    console.log('Inicializando nuevo cliente de WhatsApp...');
+    console.log('Inicializando cliente de WhatsApp en /tmp...');
     global.clientStatus = 'INITIALIZING';
 
+    // --- INICIO DE LA CORRECCIÓN CLAVE ---
+    // Le decimos a LocalAuth que guarde la sesión en la carpeta /tmp
+    // que es la única carpeta escribible en Vercel.
     global.waClient = new Client({
-        authStrategy: new LocalAuth(),
+        authStrategy: new LocalAuth({ dataPath: '/tmp' }),
         puppeteer: {
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
         },
     });
+    // --- FIN DE LA CORRECCIÓN CLAVE ---
 
     global.waClient.on('qr', (qr) => {
         console.log('QR Recibido. Escanee para autenticar.');
@@ -54,7 +54,6 @@ const initializeClient = () => {
 };
 
 module.exports = async (req, res) => {
-    // Configuración de CORS para cada respuesta
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -62,16 +61,13 @@ module.exports = async (req, res) => {
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
     }
-
-    // --- INICIO DE LA CORRECCIÓN CLAVE ---
-    // Leemos 'action' tanto de la query string (para GET) como del body (para POST)
-    const action = req.query.action || (req.body && req.body.action);
-    // --- FIN DE LA CORRECCIÓN CLAVE ---
-
+    
     // Siempre intenta inicializar si no está listo
-    if (!global.waClient && global.clientStatus !== 'INITIALIZING') {
+    if (global.clientStatus === 'UNINITIALIZED' && global.clientStatus !== 'INITIALIZING') {
         initializeClient();
     }
+
+    const action = req.query.action || (req.body && req.body.action);
     
     if (action === 'status') {
         return res.status(200).json({ status: global.clientStatus, qr: global.qrCodeData });
