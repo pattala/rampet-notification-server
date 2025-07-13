@@ -1,109 +1,104 @@
+// api/send-whatsapp.js (VERSIÓN ROBUSTA Y REESTRUCTURADA)
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 
-// Esta solución es para que la sesión de WhatsApp persista en Vercel.
-// Usamos una variable global para mantener el cliente activo entre ejecuciones.
+// --- INICIO DEL CAMBIO CLAVE ---
+// Se declara el cliente de WhatsApp FUERA del handler.
+// Esto permite que persista entre invocaciones de la función en Vercel.
 let client;
-let clientStatus = 'UNINITIALIZED'; // Estado inicial
-let qrCodeDataUrl = '';
+let qrCodeData;
+let clientStatus = 'UNINITIALIZED';
 
-function initializeWhatsApp() {
-    if (client) {
-        console.log("El cliente de WhatsApp ya está en proceso de inicialización.");
-        return;
-    }
+// Función para inicializar el cliente
+const initializeClient = () => {
+  if (client) return; // Si ya existe, no hacer nada
 
-    console.log('Inicializando nuevo cliente de WhatsApp...');
-    clientStatus = 'INITIALIZING';
-    
-    client = new Client({
-        authStrategy: new LocalAuth({ dataPath: '/tmp' }), // Vercel permite escribir en la carpeta /tmp
-        puppeteer: {
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        }
-    });
+  console.log('Inicializando cliente de WhatsApp...');
+  clientStatus = 'INITIALIZING';
 
-    client.on('qr', async (qr) => {
-        console.log('QR RECIBIDO. Escanea el código con tu teléfono.');
-        // Convertimos el QR a una imagen DataURL para poder mostrarla en el panel de admin
-        qrCodeDataUrl = await qrcode.toDataURL(qr);
-        clientStatus = 'QR_READY';
-    });
+  client = new Client({
+    authStrategy: new LocalAuth(), // Usa autenticación local para recordar la sesión
+    puppeteer: {
+      args: ['--no-sandbox', '--disable-setuid-sandbox'], // Necesario para correr en Vercel
+    },
+  });
 
-    client.on('ready', () => {
-        console.log('¡Cliente de WhatsApp está listo!');
-        clientStatus = 'READY';
-        qrCodeDataUrl = ''; // Ya no necesitamos el QR
-    });
+  client.on('qr', (qr) => {
+    console.log('QR Recibido. El cliente necesita escanear.');
+    qrCodeData = qr;
+    clientStatus = 'QR_READY';
+  });
 
-    client.on('auth_failure', msg => {
-        console.error('FALLO DE AUTENTICACIÓN. Es posible que necesites escanear el QR de nuevo.', msg);
-        clientStatus = 'AUTH_FAILURE';
-        client = null; // Reseteamos para que se pueda reintentar
-    });
+  client.on('ready', () => {
+    console.log('¡Cliente de WhatsApp está listo!');
+    qrCodeData = null; // Limpiamos el QR porque ya no es necesario
+    clientStatus = 'READY';
+  });
 
-    client.on('disconnected', (reason) => {
-        console.log('Cliente desconectado. Intentando reconectar...', reason);
-        clientStatus = 'DISCONNECTED';
-        client = null; // Reseteamos para que se pueda reintentar
-    });
-    
-    client.initialize().catch(err => {
-        console.error("Error crítico durante la inicialización de WhatsApp:", err);
-        clientStatus = "INIT_ERROR";
-        client = null; // Reseteamos
-    });
+  client.on('auth_failure', (msg) => {
+    console.error('Fallo de autenticación:', msg);
+    clientStatus = 'AUTH_FAILURE';
+    client = null; // Reseteamos para reintentar
+  });
+
+  client.on('disconnected', (reason) => {
+    console.log('Cliente desconectado:', reason);
+    clientStatus = 'DISCONNECTED';
+    client = null; // Reseteamos para reintentar
+  });
+
+  client.initialize().catch(err => {
+      console.error("Error durante la inicialización del cliente:", err);
+      clientStatus = 'ERROR';
+      client = null;
+  });
 };
 
-// Iniciar el cliente la primera vez que el servidor se carga
-initializeWhatsApp();
+// Se llama a la función de inicialización una vez cuando el servidor arranca.
+initializeClient();
+// --- FIN DEL CAMBIO CLAVE ---
 
 
-// Esta es la función principal que Vercel ejecutará cuando se llame a /api/whatsapp
+// El handler principal ahora solo consulta el estado o envía mensajes.
 module.exports = async (req, res) => {
-    // Configuración de CORS para permitir la comunicación con tu panel de admin
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  const { action, number, message } = req.body;
+  const queryAction = req.query.action;
+  
+  const finalAction = action || queryAction;
+
+  if (finalAction === 'status') {
+    // Devuelve el estado actual y el QR si existe
+    return res.status(200).json({ status: clientStatus, qr: qrCodeData });
+
+  } else if (finalAction === 'send') {
+    if (clientStatus !== 'READY') {
+      return res.status(400).json({ success: false, error: 'El cliente de WhatsApp no está listo.' });
+    }
+    if (!number || !message) {
+      return res.status(400).json({ success: false, error: 'Faltan el número o el mensaje.' });
+    }
+
+    // Formatear el número para que termine en @c.us
+    const chatId = `${number.replace('+', '')}@c.us`;
+
+    try {
+      await client.sendMessage(chatId, message);
+      return res.status(200).json({ success: true, message: 'Mensaje enviado.' });
+    } catch (error) {
+      console.error("Error al enviar mensaje:", error);
+      return res.status(500).json({ success: false, error: 'Error al enviar el mensaje.' });
     }
     
-    // Usamos un parámetro en la URL para saber qué acción realizar
-    const { action } = req.query;
-
-    // Acción para verificar el estado del servicio y obtener el QR
-    if (action === 'status') {
-        if (!client && clientStatus !== 'INITIALIZING') {
-            // Si por alguna razón el cliente se perdió, intentamos reiniciarlo
-            initializeWhatsApp();
-        }
-        return res.status(200).json({ status: clientStatus, qr: qrCodeDataUrl });
-    }
-    
-    // Acción para enviar un mensaje
-    if (action === 'send') {
-        if (clientStatus !== "READY") {
-            return res.status(503).json({ success: false, error: "El servicio de WhatsApp no está listo. Verifica el estado y escanea el QR si es necesario." });
-        }
-        
-        const { number, message } = req.body;
-        if (!number || !message) {
-            return res.status(400).json({ success: false, error: "Faltan los parámetros 'number' o 'message'." });
-        }
-
-        // Formato del número para la API: 5491123456789@c.us
-        const chatId = `${number}@c.us`;
-
-        try {
-            await client.sendMessage(chatId, message);
-            return res.status(200).json({ success: true, message: "Mensaje enviado." });
-        } catch (error) {
-            console.error("Error al enviar mensaje de WhatsApp:", error);
-            return res.status(500).json({ success: false, error: "No se pudo enviar el mensaje. ¿Es un número de WhatsApp válido?" });
-        }
-    }
-    
-    return res.status(404).json({ error: "Acción no válida. Usa ?action=status o ?action=send" });
+  } else {
+    return res.status(400).json({ error: 'Acción no válida.' });
+  }
 };
