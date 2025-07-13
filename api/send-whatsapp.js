@@ -1,10 +1,7 @@
-// api/send-whatsapp.js (VERSIÓN FINAL OPTIMIZADA PARA VERCEL)
-
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 
-// Almacenamiento global para persistir la conexión
 if (typeof global.sock === 'undefined') {
     global.sock = null;
     global.qrCodeData = null;
@@ -13,7 +10,6 @@ if (typeof global.sock === 'undefined') {
 
 async function connectToWhatsApp() {
     if (global.sock || global.connectionStatus === 'CONNECTING') {
-        console.log('Conexión ya en progreso. Estado actual:', global.connectionStatus);
         return;
     }
     
@@ -23,16 +19,12 @@ async function connectToWhatsApp() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState('/tmp/baileys_auth_info');
         
-        // --- INICIO DE LA CORRECCIÓN CLAVE ---
-        // Se añade un logger de Pino optimizado, que es más rápido.
-        // Se usa un identificador de navegador estándar.
         global.sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
             browser: ['Baileys', 'Desktop', '4.0.0'],
-            logger: pino({ level: 'silent' }), // Logger silencioso para producción
+            logger: pino({ level: 'silent' }),
         });
-        // --- FIN DE LA CORRECCIÓN CLAVE ---
 
         global.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -46,11 +38,10 @@ async function connectToWhatsApp() {
                 console.log('Conexión cerrada, motivo:', lastDisconnect.error, ', reconectando:', shouldReconnect);
                 global.connectionStatus = 'DISCONNECTED';
                 if (global.sock) {
-                    global.sock.ws.close();
                     global.sock = null;
                 }
                 if (shouldReconnect) {
-                    setTimeout(connectToWhatsApp, 5000); // Reintenta conectar después de 5s
+                    setTimeout(connectToWhatsApp, 5000);
                 }
             } else if (connection === 'open') {
                 console.log('¡Conexión de WhatsApp establecida!');
