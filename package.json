@@ -1,0 +1,12 @@
+{
+  "name": "rampet-serverless-api",
+  "version": "1.0.0",
+  "description": "Serverless function to send notifications",
+  "main": "api/send-notification.js",
+  "dependencies": {
+    "googleapis": "^92.0.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
