@@ -2,9 +2,7 @@
 
 const { google } = require("googleapis");
 
-// Vercel envuelve esto en un servidor. 'req' es la petición, 'res' es la respuesta.
 module.exports = async (req, res) => {
-  // Configuración de CORS
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -37,17 +35,15 @@ module.exports = async (req, res) => {
     const sendPromises = tokens.map(token => {
         
         // --- INICIO DE LA CORRECCIÓN ---
-        // Se construye el mensaje usando la estructura 'webpush' para incluir el logo
-        // y se elimina la clave 'notification' genérica para evitar duplicados.
+        // Ahora enviamos un payload de 'data'. El cliente se encargará de construir la notificación.
+        // Esto nos da control total y evita problemas de visualización del navegador.
         const message = {
             message: {
                 token: token,
-                webpush: {
-                    notification: {
-                        title: title,
-                        body: body,
-                        icon: 'https://i.postimg.cc/tJgqS2sW/mi-logo.png' // URL de tu logo
-                    }
+                data: {
+                    title: title,
+                    body: body,
+                    icon: 'https://i.postimg.cc/tJgqS2sW/mi-logo.png' // URL del logo
                 }
             },
         };
