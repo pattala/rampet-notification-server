@@ -1,9 +1,10 @@
-// api/send-whatsapp.js (VERSIÓN FINAL CON BAILEYS PARA VERCEL)
+// api/send-whatsapp.js (VERSIÓN FINAL OPTIMIZADA PARA VERCEL)
 
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
+import pino from 'pino';
 
-// Almacenamiento global para persistir la conexión entre llamadas de la función
+// Almacenamiento global para persistir la conexión
 if (typeof global.sock === 'undefined') {
     global.sock = null;
     global.qrCodeData = null;
@@ -11,8 +12,8 @@ if (typeof global.sock === 'undefined') {
 }
 
 async function connectToWhatsApp() {
-    // Si ya hay una conexión o se está intentando conectar, no hacer nada.
     if (global.sock || global.connectionStatus === 'CONNECTING') {
+        console.log('Conexión ya en progreso. Estado actual:', global.connectionStatus);
         return;
     }
     
@@ -20,16 +21,19 @@ async function connectToWhatsApp() {
     global.connectionStatus = 'CONNECTING';
 
     try {
-        // Guarda las credenciales en la única carpeta escribible de Vercel: /tmp
         const { state, saveCreds } = await useMultiFileAuthState('/tmp/baileys_auth_info');
         
+        // --- INICIO DE LA CORRECCIÓN CLAVE ---
+        // Se añade un logger de Pino optimizado, que es más rápido.
+        // Se usa un identificador de navegador estándar.
         global.sock = makeWASocket({
             auth: state,
-            printQRInTerminal: false, // El QR se manejará vía API
-            browser: ['RAMPET-Server', 'Chrome', '1.0.0'],
+            printQRInTerminal: false,
+            browser: ['Baileys', 'Desktop', '4.0.0'],
+            logger: pino({ level: 'silent' }), // Logger silencioso para producción
         });
+        // --- FIN DE LA CORRECCIÓN CLAVE ---
 
-        // Manejador de eventos de la conexión
         global.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
             if (qr) {
@@ -41,10 +45,12 @@ async function connectToWhatsApp() {
                 const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
                 console.log('Conexión cerrada, motivo:', lastDisconnect.error, ', reconectando:', shouldReconnect);
                 global.connectionStatus = 'DISCONNECTED';
-                global.sock = null;
-                global.qrCodeData = null;
+                if (global.sock) {
+                    global.sock.ws.close();
+                    global.sock = null;
+                }
                 if (shouldReconnect) {
-                    connectToWhatsApp();
+                    setTimeout(connectToWhatsApp, 5000); // Reintenta conectar después de 5s
                 }
             } else if (connection === 'open') {
                 console.log('¡Conexión de WhatsApp establecida!');
@@ -53,17 +59,15 @@ async function connectToWhatsApp() {
             }
         });
 
-        // Guarda las credenciales cada vez que se actualizan
         global.sock.ev.on('creds.update', saveCreds);
         
     } catch (error) {
-        console.error('Error fatal durante la inicialización de Baileys:', error);
+        console.error('Error fatal al inicializar Baileys:', error);
         global.connectionStatus = 'ERROR';
         global.sock = null;
     }
 }
 
-// Handler principal de la función serverless
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -73,8 +77,7 @@ export default async function handler(req, res) {
         return res.status(200).end();
     }
 
-    // Inicia la conexión la primera vez que se llama a la función
-    if (!global.sock && global.connectionStatus !== 'CONNECTING') {
+    if (global.connectionStatus === 'UNINITIALIZED') {
         connectToWhatsApp();
     }
 
@@ -93,7 +96,6 @@ export default async function handler(req, res) {
             return res.status(400).json({ success: false, error: 'Faltan número o mensaje.' });
         }
         try {
-            // Formatea el número al formato JID que usa Baileys
             const jid = `${number.replace(/\D/g, '')}@s.whatsapp.net`;
             await global.sock.sendMessage(jid, { text: message });
             return res.status(200).json({ success: true, message: 'Mensaje enviado.' });
