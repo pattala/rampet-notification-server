@@ -1,56 +1,65 @@
-// api/send-whatsapp.js (VERSIÓN FINAL CON RUTA /tmp)
+// api/send-whatsapp.js (VERSIÓN FINAL CON CHROMIUM PARA VERCEL)
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode');
+const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer-core');
+const { Client, LocalAuth } = require('whatsapp-web.js-plus');
 
+// Almacenamiento global para persistir el cliente
 if (typeof global.waClient === 'undefined') {
     global.waClient = null;
     global.qrCodeData = null;
     global.clientStatus = 'UNINITIALIZED';
 }
 
-const initializeClient = () => {
+const initializeClient = async () => {
     if (global.waClient || global.clientStatus === 'INITIALIZING') {
         return;
     }
 
-    console.log('Inicializando cliente de WhatsApp en /tmp...');
+    console.log('Inicializando cliente de WhatsApp con Chromium para Vercel...');
     global.clientStatus = 'INITIALIZING';
 
-    // --- INICIO DE LA CORRECCIÓN CLAVE ---
-    // Le decimos a LocalAuth que guarde la sesión en la carpeta /tmp
-    // que es la única carpeta escribible en Vercel.
-    global.waClient = new Client({
-        authStrategy: new LocalAuth({ dataPath: '/tmp' }),
-        puppeteer: {
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        },
-    });
-    // --- FIN DE LA CORRECCIÓN CLAVE ---
+    try {
+        const browser = await puppeteer.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true,
+        });
 
-    global.waClient.on('qr', (qr) => {
-        console.log('QR Recibido. Escanee para autenticar.');
-        global.qrCodeData = qr;
-        global.clientStatus = 'QR_READY';
-    });
+        global.waClient = new Client({
+            authStrategy: new LocalAuth({ dataPath: '/tmp' }),
+            puppeteer: {
+                browserWSEndpoint: browser.wsEndpoint()
+            }
+        });
 
-    global.waClient.on('ready', () => {
-        console.log('¡Cliente de WhatsApp está listo!');
-        global.qrCodeData = null;
-        global.clientStatus = 'READY';
-    });
+        global.waClient.on('qr', (qr) => {
+            console.log('QR Recibido. Escanee para autenticar.');
+            global.qrCodeData = qr;
+            global.clientStatus = 'QR_READY';
+        });
 
-    global.waClient.on('disconnected', (reason) => {
-        console.log('Cliente desconectado:', reason);
-        global.waClient = null;
-        global.clientStatus = 'UNINITIALIZED';
-    });
+        global.waClient.on('ready', () => {
+            console.log('¡Cliente de WhatsApp está listo!');
+            global.qrCodeData = null;
+            global.clientStatus = 'READY';
+        });
 
-    global.waClient.initialize().catch(err => {
+        global.waClient.on('disconnected', (reason) => {
+            console.log('Cliente desconectado:', reason);
+            global.waClient = null;
+            global.clientStatus = 'UNINITIALIZED';
+        });
+
+        await global.waClient.initialize();
+
+    } catch (err) {
         console.error("Error catastrófico durante la inicialización:", err);
         global.waClient = null;
         global.clientStatus = 'ERROR';
-    });
+    }
 };
 
 module.exports = async (req, res) => {
@@ -61,14 +70,13 @@ module.exports = async (req, res) => {
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
     }
-    
-    // Siempre intenta inicializar si no está listo
+
     if (global.clientStatus === 'UNINITIALIZED' && global.clientStatus !== 'INITIALIZING') {
         initializeClient();
     }
-
-    const action = req.query.action || (req.body && req.body.action);
     
+    const action = req.query.action || (req.body && req.body.action);
+
     if (action === 'status') {
         return res.status(200).json({ status: global.clientStatus, qr: global.qrCodeData });
     }
