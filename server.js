@@ -4,18 +4,16 @@ const bodyParser = require("body-parser");
 const cors = require('cors');
 const app = express();
 
-// --- CONFIGURACIÓN DE CORS EXPLÍCITA ---
-// Esto le dice al servidor que acepte peticiones de cualquier origen.
-app.use(cors({
-  origin: '*'
-}));
+// --- CONFIGURACIÓN DE CORS DEFINITIVA ---
+// 1. Habilitamos CORS para todas las rutas
+app.use(cors());
 
-// Esto maneja las peticiones 'preflight' que los navegadores envían
-// para comprobar los permisos antes de enviar la petición POST real.
-app.options('*', cors()); 
+// 2. Respondemos explícitamente a las peticiones OPTIONS preflight
+// Esto es lo que los navegadores envían para verificar los permisos ANTES de la petición POST
+app.options('/send-notification', cors());
 // -----------------------------------------
 
-
+// Usamos bodyParser para poder leer el cuerpo de las peticiones POST
 app.use(bodyParser.json());
 
 // La clave secreta NO se sube a GitHub. La leemos desde las variables de entorno de Render.
