@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/**/*.js": {
+      "includedFiles": ["node_modules/@sparticuz/chromium/bin/**"]
+    }
+  }
+}
