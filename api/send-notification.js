@@ -43,7 +43,7 @@ module.exports = async (req, res) => {
                 data: {
                     title: title,
                     body: body,
-                    icon: 'https://i.postimg.cc/tJgqS2sW/mi-logo.png' // URL del logo
+                    icon: 'https://github.com/pattala/rampet-cliente-app/blob/main/images/mi_logo.png' // URL del logo
                 }
             },
         };
