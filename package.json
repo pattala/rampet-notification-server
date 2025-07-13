@@ -6,7 +6,7 @@
     "googleapis": "^92.0.0",
     "whatsapp-web.js": "1.23.0",
     "qrcode": "^1.5.3",
-    "puppeteer": "^21.0.0"
+     "qrcode": "^1.5.3"
   },
   "engines": {
     "node": "18.x"
