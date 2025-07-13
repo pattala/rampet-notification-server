@@ -1,4 +1,4 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from 'baileys'; // <--- CAMBIO AQUÍ
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 
