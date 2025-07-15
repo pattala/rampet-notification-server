@@ -1,31 +1,37 @@
-// api/send-email.js (CORREGIDO - USA COMMONJS)
+// api/send-email.js (VERSIÓN FINAL CON CORS)
 
-// Usamos require para importar el módulo en un entorno CommonJS
 const sgMail = require('@sendgrid/mail');
 
-// Configurar la clave API desde las variables de entorno de Vercel
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// El "Single Sender" verificado en SendGrid
 const SENDER_EMAIL = "rampet.local@gmail.com";
 
-/**
- * Handler para la función serverless de Vercel.
- * Se exporta con module.exports para ser compatible con el entorno por defecto de Vercel.
- */
 module.exports = async (req, res) => {
-    // 1. Validar el método de la petición
+    // ---- INICIO DE LA SOLUCIÓN CORS ----
+    // Estas cabeceras le dicen al navegador que esta API puede ser llamada desde cualquier origen.
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    // El navegador envía una petición "previa" (preflight) de tipo OPTIONS para verificar los permisos.
+    // Si la petición es OPTIONS, simplemente respondemos que todo está OK y terminamos.
+    if (req.method === 'OPTIONS') {
+        return res.status(204).send('');
+    }
+    // ---- FIN DE LA SOLUCIÓN CORS ----
+
+
+    // 1. Validar el método de la petición (ahora solo nos preocupamos por POST)
     if (req.method !== 'POST') {
         res.setHeader('Allow', ['POST']);
         return res.status(405).json({ message: `Method ${req.method} Not Allowed` });
     }
 
     // 2. Extraer y validar los datos del cuerpo de la petición
-    // Vercel parsea automáticamente el body si el Content-Type es application/json
     const { to, name } = req.body;
 
     if (!to || !name) {
-        return res.status(400).json({ message: 'Petición inválida. El email (to) y el nombre (name) son requeridos en el cuerpo de la solicitud.' });
+        return res.status(400).json({ message: 'Petición inválida. El email (to) y el nombre (name) son requeridos.' });
     }
 
     // 3. Crear el contenido del email
@@ -55,12 +61,9 @@ module.exports = async (req, res) => {
         return res.status(200).json({ message: 'Email enviado correctamente.' });
     } catch (error) {
         console.error('Error al enviar el email con SendGrid:', error);
-        
-        // Si SendGrid devuelve información de error, la mostramos en los logs del servidor
         if (error.response) {
             console.error(error.response.body);
         }
-        
         return res.status(500).json({ message: 'Error interno del servidor al intentar enviar el email.' });
     }
 };
