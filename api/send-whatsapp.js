@@ -1,7 +1,10 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from 'baileys'; // <--- CAMBIO AQUÍ
+// api/send-whatsapp.js (VERSIÓN FINAL TOLERANTE A TIMEOUTS)
+
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from 'baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 
+// Almacenamiento global para persistir el estado entre ejecuciones
 if (typeof global.sock === 'undefined') {
     global.sock = null;
     global.qrCodeData = null;
@@ -9,11 +12,12 @@ if (typeof global.sock === 'undefined') {
 }
 
 async function connectToWhatsApp() {
+    // Si ya está conectado o conectando, no hacer nada
     if (global.sock || global.connectionStatus === 'CONNECTING') {
         return;
     }
     
-    console.log('Iniciando nueva conexión con Baileys...');
+    console.log('Iniciando conexión con Baileys...');
     global.connectionStatus = 'CONNECTING';
 
     try {
@@ -22,29 +26,27 @@ async function connectToWhatsApp() {
         global.sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
-            browser: ['Baileys', 'Desktop', '4.0.0'],
+            browser: ['RAMPET-Server', 'Chrome', '1.0.0'],
             logger: pino({ level: 'silent' }),
         });
 
+        // Manejador de eventos clave
         global.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
             if (qr) {
-                console.log('QR generado. Esperando escaneo.');
+                console.log('QR generado.');
                 global.qrCodeData = qr;
                 global.connectionStatus = 'QR_READY';
             }
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('Conexión cerrada, motivo:', lastDisconnect.error, ', reconectando:', shouldReconnect);
+                const statusCode = (lastDisconnect.error instanceof Boom)?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                console.log(`Conexión cerrada, motivo: ${statusCode}, reconectando: ${shouldReconnect}`);
                 global.connectionStatus = 'DISCONNECTED';
-                if (global.sock) {
-                    global.sock = null;
-                }
-                if (shouldReconnect) {
-                    setTimeout(connectToWhatsApp, 5000);
-                }
+                global.sock = null;
+                global.qrCodeData = null;
             } else if (connection === 'open') {
-                console.log('¡Conexión de WhatsApp establecida!');
+                console.log('Conexión de WhatsApp establecida.');
                 global.connectionStatus = 'READY';
                 global.qrCodeData = null;
             }
@@ -53,12 +55,13 @@ async function connectToWhatsApp() {
         global.sock.ev.on('creds.update', saveCreds);
         
     } catch (error) {
-        console.error('Error fatal al inicializar Baileys:', error);
+        console.error('Error en connectToWhatsApp:', error);
         global.connectionStatus = 'ERROR';
         global.sock = null;
     }
 }
 
+// Handler principal de la función
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -68,17 +71,20 @@ export default async function handler(req, res) {
         return res.status(200).end();
     }
 
-    if (global.connectionStatus === 'UNINITIALIZED') {
+    // Intenta iniciar la conexión si nunca se ha hecho
+    if (global.connectionStatus === 'UNINITIALIZED' || (global.connectionStatus === 'DISCONNECTED' && !global.sock)) {
         connectToWhatsApp();
     }
 
     const action = req.query.action || (req.body && req.body.action);
 
     if (action === 'status') {
+        // Devuelve el estado actual inmediatamente, sea cual sea.
         return res.status(200).json({ status: global.connectionStatus, qr: global.qrCodeData });
     }
 
     if (action === 'send') {
+        // Lógica de envío (sin cambios)
         if (global.connectionStatus !== 'READY') {
             return res.status(400).json({ success: false, error: 'Cliente de WhatsApp no está listo.' });
         }
