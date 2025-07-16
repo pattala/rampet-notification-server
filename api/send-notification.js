@@ -11,14 +11,16 @@ module.exports = async (req, res) => {
         return res.status(500).json({ message: 'Error de configuración del servidor.' });
     }
     if (!providedKey || providedKey !== `Bearer ${secretKey}`) {
+        // Petición no autorizada.
         return res.status(401).json({ message: 'Acceso no autorizado.' });
     }
     // ----- FIN DEL BLOQUE DE SEGURIDAD -----
 
+    // Manejo de CORS, incluyendo la cabecera 'Authorization'.
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); // Se mantiene 'Authorization'
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
