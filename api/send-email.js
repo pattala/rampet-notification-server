@@ -14,14 +14,16 @@ module.exports = async (req, res) => {
         return res.status(500).json({ message: 'Error de configuración del servidor.' });
     }
     if (!providedKey || providedKey !== `Bearer ${secretKey}`) {
+        // Esta petición no es de confianza, la rechazamos.
         return res.status(401).json({ message: 'Acceso no autorizado.' });
     }
     // ----- FIN DEL BLOQUE DE SEGURIDAD -----
 
     // ---- INICIO DE LA SOLUCIÓN CORS ----
+    // Ahora permitimos la cabecera 'Authorization' para que el navegador no bloquee la petición.
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); // Se añade 'Authorization'
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
         return res.status(204).send('');
