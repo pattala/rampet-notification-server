@@ -1,11 +1,24 @@
-// api/send-email.js (VERSIÓN FINAL SEGURA CON API KEY)
+// api/send-email.js (VERSIÓN FINAL CON LÓGICA CORS CORREGIDA)
 const sgMail = require('@sendgrid/mail');
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const SENDER_EMAIL = "rampet.local@gmail.com";
 
 module.exports = async (req, res) => {
-    // ----- INICIO DEL BLOQUE DE SEGURIDAD -----
+    // ---- INICIO DE LA SOLUCIÓN CORS (AHORA AL PRINCIPIO) ----
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    // Si es la pregunta "pre-vuelo" (OPTIONS), respondemos OK y terminamos.
+    // Esto es crucial para que el navegador permita la petición real.
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    // ---- FIN DE LA SOLUCIÓN CORS ----
+
+    // ----- INICIO DEL BLOQUE DE SEGURIDAD (AHORA DESPUÉS DE CORS) -----
+    // Este bloque solo se ejecuta para las peticiones POST, no para OPTIONS.
     const secretKey = process.env.API_SECRET_KEY;
     const providedKey = req.headers.authorization;
 
@@ -14,31 +27,18 @@ module.exports = async (req, res) => {
         return res.status(500).json({ message: 'Error de configuración del servidor.' });
     }
     if (!providedKey || providedKey !== `Bearer ${secretKey}`) {
-        // Esta petición no es de confianza, la rechazamos.
         return res.status(401).json({ message: 'Acceso no autorizado.' });
     }
     // ----- FIN DEL BLOQUE DE SEGURIDAD -----
 
-    // ---- INICIO DE LA SOLUCIÓN CORS ----
-    // Ahora permitimos la cabecera 'Authorization' para que el navegador no bloquee la petición.
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-    if (req.method === 'OPTIONS') {
-        return res.status(204).send('');
-    }
-    // ---- FIN DE LA SOLUCIÓN CORS ----
-
     if (req.method !== 'POST') {
-        res.setHeader('Allow', ['POST']);
         return res.status(405).json({ message: `Method ${req.method} Not Allowed` });
     }
     
     const { to, name } = req.body;
 
     if (!to || !name) {
-        return res.status(400).json({ message: 'Petición inválida. El email (to) y el nombre (name) son requeridos.' });
+        return res.status(400).json({ message: 'Petición inválida: Faltan email (to) o nombre (name).' });
     }
     
     const msg = {
@@ -66,10 +66,7 @@ module.exports = async (req, res) => {
         await sgMail.send(msg);
         return res.status(200).json({ message: 'Email enviado correctamente.' });
     } catch (error) {
-        console.error('Error al enviar el email con SendGrid:', error);
-        if (error.response) {
-            console.error(error.response.body);
-        }
+        console.error('Error al enviar el email con SendGrid:', error.response?.body || error);
         return res.status(500).json({ message: 'Error interno del servidor al intentar enviar el email.' });
     }
 };
