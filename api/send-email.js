@@ -1,4 +1,4 @@
-// api/send-email.js (Versión Final para SendGrid y Plantillas)
+//A api/send-email.js (Versión Final para SendGrid y Plantillas)
 
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
