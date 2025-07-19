@@ -1,72 +1,73 @@
-// api/send-email.js (VERSIÓN FINAL CON LÓGICA CORS CORREGIDA)
-const sgMail = require('@sendgrid/mail');
+// api/send-email.js
+const admin = require('firebase-admin');
+const nodemailer = require('nodemailer');
 
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-const SENDER_EMAIL = "rampet.local@gmail.com";
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+if (!admin.apps.length) {
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+}
+const db = admin.firestore();
 
-module.exports = async (req, res) => {
-    // ---- INICIO DE LA SOLUCIÓN CORS (AHORA AL PRINCIPIO) ----
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST,
+  port: process.env.EMAIL_PORT,
+  secure: true,
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+});
 
-    // Si es la pregunta "pre-vuelo" (OPTIONS), respondemos OK y terminamos.
-    // Esto es crucial para que el navegador permita la petición real.
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
+function replacePlaceholders(template, data = {}) {
+    let result = template;
+    for (const key in data) {
+        const regex = new RegExp(`{${key}}`, 'g');
+        result = result.replace(regex, data[key]);
     }
-    // ---- FIN DE LA SOLUCIÓN CORS ----
+    return result;
+}
 
-    // ----- INICIO DEL BLOQUE DE SEGURIDAD (AHORA DESPUÉS DE CORS) -----
-    // Este bloque solo se ejecuta para las peticiones POST, no para OPTIONS.
-    const secretKey = process.env.API_SECRET_KEY;
-    const providedKey = req.headers.authorization;
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-    if (!secretKey) {
-        console.error("API_SECRET_KEY no está configurada en Vercel.");
-        return res.status(500).json({ message: 'Error de configuración del servidor.' });
-    }
-    if (!providedKey || providedKey !== `Bearer ${secretKey}`) {
-        return res.status(401).json({ message: 'Acceso no autorizado.' });
-    }
-    // ----- FIN DEL BLOQUE DE SEGURIDAD -----
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ message: 'Solo se permite POST' });
+  if (req.headers.authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
+    return res.status(401).json({ message: 'No autorizado' });
+  }
 
-    if (req.method !== 'POST') {
-        return res.status(405).json({ message: `Method ${req.method} Not Allowed` });
+  const { to, templateId, templateData } = req.body;
+  if (!to || !templateId) {
+    return res.status(400).json({ message: 'Faltan parámetros: to, templateId son requeridos.' });
+  }
+
+  try {
+    const templateDoc = await db.collection('plantillas_mensajes').doc(templateId).get();
+    if (!templateDoc.exists) {
+        return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` });
     }
+    const plantilla = templateDoc.data();
+
+    const subject = replacePlaceholders(plantilla.titulo, templateData);
+    const body = replacePlaceholders(plantilla.cuerpo, templateData);
     
-    const { to, name } = req.body;
+    const htmlBody = `
+      <div style="font-family: Arial, sans-serif; color: #333;">
+        <h2>${subject}</h2>
+        <p>${body.replace(/\n/g, '<br>')}</p><br>
+        <p>Atentamente,<br><strong>El equipo de RAMPET</strong></p>
+      </div>
+    `;
 
-    if (!to || !name) {
-        return res.status(400).json({ message: 'Petición inválida: Faltan email (to) o nombre (name).' });
-    }
+    await transporter.sendMail({
+      from: `"Club RAMPET" <${process.env.EMAIL_USER}>`,
+      to: to,
+      subject: subject,
+      html: htmlBody,
+    });
     
-    const msg = {
-        to: to,
-        from: {
-            name: 'Equipo RAMPET',
-            email: SENDER_EMAIL,
-        },
-        subject: `¡Bienvenido a RAMPET, ${name}!`,
-        html: `
-            <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
-                <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo de RAMPET" style="width: 150px; display: block; margin: 0 auto 20px auto;">
-                <h2 style="color: #4A90E2;">¡Hola ${name}, te damos la bienvenida a RAMPET!</h2>
-                <p>Estamos muy contentos de que te unas a nuestro programa de fidelización.</p>
-                <p>A partir de ahora, acumularás puntos con cada compra que podrás canjear por increíbles premios.</p>
-                <p>Puedes consultar tus puntos y los premios disponibles en nuestra aplicación web.</p>
-                <br>
-                <p>¡Gracias por ser parte de RAMPET!</p>
-                <p><strong>El equipo de RAMPET</strong></p>
-            </div>
-        `,
-    };
-
-    try {
-        await sgMail.send(msg);
-        return res.status(200).json({ message: 'Email enviado correctamente.' });
-    } catch (error) {
-        console.error('Error al enviar el email con SendGrid:', error.response?.body || error);
-        return res.status(500).json({ message: 'Error interno del servidor al intentar enviar el email.' });
-    }
-};
+    return res.status(200).json({ message: 'Email enviado con éxito.' });
+  } catch (error) {
+    console.error('Error al procesar el envío de email:', error);
+    return res.status(500).json({ message: 'Error interno del servidor.', error: error.message });
+  }
+}
