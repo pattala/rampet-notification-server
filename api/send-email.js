@@ -1,12 +1,23 @@
 // api/send-email.js
-const admin = require('firebase-admin');
+// --- CAMBIO 1: Importación selectiva ---
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
+// --- FIN CAMBIO 1 ---
 const nodemailer = require('nodemailer');
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-if (!admin.apps.length) {
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+
+// --- CAMBIO 2: Lógica de inicialización ---
+try {
+  initializeApp({ credential: cert(serviceAccount) });
+} catch (e) {
+  // Ignorar el error si la app ya está inicializada
+  if (e.code !== 'app/duplicate-app') {
+    console.error('Firebase admin initialization error', e);
+  }
 }
-const db = admin.firestore();
+const db = getFirestore();
+// --- FIN CAMBIO 2 ---
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
