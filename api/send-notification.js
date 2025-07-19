@@ -2,7 +2,7 @@
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
 try { initializeApp({ credential: cert(serviceAccount) }); } catch (e) { if (e.code !== 'app/duplicate-app') console.error('Firebase init error', e); }
 const db = getFirestore();
 const messaging = getMessaging();
