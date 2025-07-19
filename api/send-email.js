@@ -3,7 +3,7 @@ const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const sgMail = require('@sendgrid/mail');
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
 try { initializeApp({ credential: cert(serviceAccount) }); } catch (e) { if (e.code !== 'app/duplicate-app') console.error('Firebase init error', e); }
 const db = getFirestore();
 function replacePlaceholders(template, data = {}) { let result = template; for (const key in data) { result = result.replace(new RegExp(`{${key}}`, 'g'), data[key]); } return result; }
