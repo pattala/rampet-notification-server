@@ -1,90 +1,68 @@
-// api/send-notification.js (VERSIÓN FINAL CON LÓGICA CORS CORREGIDA)
-const { google } = require("googleapis");
+// api/send-notification.js
+const admin = require('firebase-admin');
 
-module.exports = async (req, res) => {
-    // ---- INICIO DE LA SOLUCIÓN CORS (AHORA AL PRINCIPIO) ----
-    res.setHeader('Access-Control-Allow-Credentials', true);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+if (!admin.apps.length) {
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+}
+const db = admin.firestore();
+const messaging = admin.messaging();
 
-    // Si es la pregunta "pre-vuelo" (OPTIONS), respondemos OK y terminamos.
-    // Esto es crucial para que el navegador permita la petición real.
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
+function replacePlaceholders(template, data = {}) {
+    let result = template;
+    for (const key in data) {
+        const regex = new RegExp(`{${key}}`, 'g');
+        result = result.replace(regex, data[key]);
     }
-    // ---- FIN DE LA SOLUCIÓN CORS ----
+    return result;
+}
+
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ message: 'Solo se permite POST' });
+  if (req.headers.authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
+    return res.status(401).json({ message: 'No autorizado' });
+  }
+
+  // Ahora aceptamos 'templateId' y 'templateData'
+  const { tokens, templateId, templateData } = req.body;
+  if (!tokens || !Array.isArray(tokens) || tokens.length === 0 || !templateId) {
+    return res.status(400).json({ error: 'Parámetros inválidos. Se requieren tokens y templateId.' });
+  }
+
+  try {
+    const templateDoc = await db.collection('plantillas_mensajes').doc(templateId).get();
+    if (!templateDoc.exists) {
+      return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` });
+    }
+    const plantilla = templateDoc.data();
+
+    const title = replacePlaceholders(plantilla.titulo, templateData);
+    const body = replacePlaceholders(plantilla.cuerpo, templateData);
+
+    const message = {
+      notification: { title, body },
+      tokens: tokens,
+    };
+
+    const response = await messaging.sendEachForMulticast(message);
     
-    // ----- INICIO DEL BLOQUE DE SEGURIDAD (AHORA DESPUÉS DE CORS) -----
-    // Este bloque solo se ejecuta para las peticiones POST, no para OPTIONS.
-    const secretKey = process.env.API_SECRET_KEY;
-    const providedKey = req.headers.authorization;
+    const successCount = response.successCount;
+    const failureCount = response.failureCount;
 
-    if (!secretKey) {
-        console.error("API_SECRET_KEY no está configurada en Vercel.");
-        return res.status(500).json({ message: 'Error de configuración del servidor.' });
-    }
-    if (!providedKey || providedKey !== `Bearer ${secretKey}`) {
-        return res.status(401).json({ message: 'Acceso no autorizado.' });
-    }
-    // ----- FIN DEL BLOQUE DE SEGURIDAD -----
-    
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Solo se permiten peticiones POST' });
-    }
+    console.log(`Notificaciones enviadas: ${successCount} éxito(s), ${failureCount} fallo(s).`);
 
-    const { tokens, title, body } = req.body;
-
-    if (!tokens || !title || !body || !Array.isArray(tokens) || tokens.length === 0) {
-        return res.status(400).json({ error: "Faltan datos o son incorrectos: tokens (array no vacío), title o body." });
-    }
-
-    try {
-        const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
-        const jwtClient = new google.auth.JWT(
-            serviceAccount.client_email,
-            null,
-            serviceAccount.private_key,
-            ["https://www.googleapis.com/auth/firebase.messaging"]
-        );
-
-        const accessToken = await jwtClient.getAccessToken();
-        let successCount = 0;
-        let failureCount = 0;
-
-        const sendPromises = tokens.map(token => {
-            const message = {
-                message: {
-                    token: token,
-                    data: {
-                        title: title,
-                        body: body,
-                        icon: 'https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png'
-                    }
-                },
-            };
-            
-            return fetch(`https://fcm.googleapis.com/v1/projects/sistema-fidelizacion/messages:send`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${accessToken.token}`,
-                },
-                body: JSON.stringify(message),
-            }).then(response => {
-                if (response.ok) {
-                    successCount++;
-                } else {
-                    failureCount++;
-                }
-            });
-        });
-
-        await Promise.all(sendPromises);
-        return res.status(200).json({ success: true, successCount, failureCount });
-
-    } catch (error) {
-        console.error("Error en la función serverless:", error);
-        return res.status(500).json({ error: "Error interno del servidor." });
-    }
-};
+    return res.status(200).json({ 
+      message: 'Operación completada.',
+      successCount,
+      failureCount 
+    });
+  } catch (error) {
+    console.error('Error al enviar notificaciones:', error);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+}
