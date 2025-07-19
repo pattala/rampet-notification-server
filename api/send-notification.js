@@ -1,12 +1,23 @@
 // api/send-notification.js
-const admin = require('firebase-admin');
+// --- CAMBIO 1: Importación selectiva ---
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
+const { getMessaging } = require('firebase-admin/messaging');
+// --- FIN CAMBIO 1 ---
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-if (!admin.apps.length) {
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+
+// --- CAMBIO 2: Lógica de inicialización ---
+try {
+  initializeApp({ credential: cert(serviceAccount) });
+} catch (e) {
+  if (e.code !== 'app/duplicate-app') {
+    console.error('Firebase admin initialization error', e);
+  }
 }
-const db = admin.firestore();
-const messaging = admin.messaging();
+const db = getFirestore();
+const messaging = getMessaging();
+// --- FIN CAMBIO 2 ---
 
 function replacePlaceholders(template, data = {}) {
     let result = template;
@@ -28,7 +39,6 @@ export default async function handler(req, res) {
     return res.status(401).json({ message: 'No autorizado' });
   }
 
-  // Ahora aceptamos 'templateId' y 'templateData'
   const { tokens, templateId, templateData } = req.body;
   if (!tokens || !Array.isArray(tokens) || tokens.length === 0 || !templateId) {
     return res.status(400).json({ error: 'Parámetros inválidos. Se requieren tokens y templateId.' });
