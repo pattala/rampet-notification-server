@@ -1,31 +1,28 @@
-// api/send-email.js
-// --- CAMBIO 1: Importación selectiva ---
+// api/send-email.js (Versión Final para SendGrid)
+
+// --- Importación selectiva para reducir tamaño ---
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-// --- FIN CAMBIO 1 ---
-const nodemailer = require('nodemailer');
+const sgMail = require('@sendgrid/mail');
 
+// --- Configuración de SendGrid ---
+// Tu clave de API de SendGrid debe estar en las variables de entorno de Vercel
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+// --- Configuración de Firebase Admin ---
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-
-// --- CAMBIO 2: Lógica de inicialización ---
 try {
+  // Inicializa la app solo si no ha sido inicializada antes
   initializeApp({ credential: cert(serviceAccount) });
 } catch (e) {
-  // Ignorar el error si la app ya está inicializada
+  // Ignora el error si la app ya existe, que es normal en entornos serverless
   if (e.code !== 'app/duplicate-app') {
     console.error('Firebase admin initialization error', e);
   }
 }
 const db = getFirestore();
-// --- FIN CAMBIO 2 ---
 
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: process.env.EMAIL_PORT,
-  secure: true,
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-});
-
+// --- Función de reemplazo de variables ---
 function replacePlaceholders(template, data = {}) {
     let result = template;
     for (const key in data) {
@@ -35,7 +32,9 @@ function replacePlaceholders(template, data = {}) {
     return result;
 }
 
+// --- Handler principal de la API ---
 export default async function handler(req, res) {
+  // Configuración de CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -69,16 +68,26 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    await transporter.sendMail({
-      from: `"Club RAMPET" <${process.env.EMAIL_USER}>`,
+    const msg = {
       to: to,
+      // IMPORTANTE: Este debe ser un email que hayas verificado en tu cuenta de SendGrid
+      from: {
+        email: process.env.SENDGRID_FROM_EMAIL,
+        name: 'Club RAMPET' // Puedes personalizar el nombre del remitente aquí
+      },
       subject: subject,
       html: htmlBody,
-    });
+    };
+
+    await sgMail.send(msg);
     
-    return res.status(200).json({ message: 'Email enviado con éxito.' });
+    return res.status(200).json({ message: 'Email enviado con éxito a través de SendGrid.' });
+
   } catch (error) {
-    console.error('Error al procesar el envío de email:', error);
+    console.error('Error al procesar el envío con SendGrid:', error);
+    if (error.response) {
+        console.error(error.response.body);
+    }
     return res.status(500).json({ message: 'Error interno del servidor.', error: error.message });
   }
 }
