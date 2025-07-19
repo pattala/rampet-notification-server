@@ -1,38 +1,35 @@
-// api/send-email.js (Versión Final para SendGrid)
+// api/send-email.js (Versión Final para SendGrid y Plantillas)
 
-// --- Importación selectiva para reducir tamaño ---
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const sgMail = require('@sendgrid/mail');
 
-// --- Configuración de SendGrid ---
-// Tu clave de API de SendGrid debe estar en las variables de entorno de Vercel
+// Configurar el API Key de SendGrid desde variables de entorno
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// --- Configuración de Firebase Admin ---
+// Cargar credenciales de Firebase desde variables de entorno
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+
+// Inicializar Firebase Admin SDK
 try {
-  // Inicializa la app solo si no ha sido inicializada antes
   initializeApp({ credential: cert(serviceAccount) });
 } catch (e) {
-  // Ignora el error si la app ya existe, que es normal en entornos serverless
   if (e.code !== 'app/duplicate-app') {
     console.error('Firebase admin initialization error', e);
   }
 }
 const db = getFirestore();
 
-// --- Función de reemplazo de variables ---
+// Función auxiliar para reemplazar variables
 function replacePlaceholders(template, data = {}) {
     let result = template;
     for (const key in data) {
-        const regex = new RegExp(`{${key}}`, 'g');
-        result = result.replace(regex, data[key]);
+        result = result.replace(new RegExp(`{${key}}`, 'g'), data[key]);
     }
     return result;
 }
 
-// --- Handler principal de la API ---
+// Handler principal de la API
 export default async function handler(req, res) {
   // Configuración de CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -45,40 +42,47 @@ export default async function handler(req, res) {
     return res.status(401).json({ message: 'No autorizado' });
   }
 
+  // Extraer los datos requeridos
   const { to, templateId, templateData } = req.body;
   if (!to || !templateId) {
     return res.status(400).json({ message: 'Faltan parámetros: to, templateId son requeridos.' });
   }
 
   try {
+    // 1. Obtener la plantilla de Firestore
     const templateDoc = await db.collection('plantillas_mensajes').doc(templateId).get();
     if (!templateDoc.exists) {
         return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` });
     }
     const plantilla = templateDoc.data();
 
+    // 2. Personalizar el contenido
     const subject = replacePlaceholders(plantilla.titulo, templateData);
     const body = replacePlaceholders(plantilla.cuerpo, templateData);
     
+    // 3. Crear el cuerpo del email en formato HTML
     const htmlBody = `
-      <div style="font-family: Arial, sans-serif; color: #333;">
-        <h2>${subject}</h2>
-        <p>${body.replace(/\n/g, '<br>')}</p><br>
-        <p>Atentamente,<br><strong>El equipo de RAMPET</strong></p>
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #0056b3;">${subject}</h2>
+        <p>${body.replace(/\n/g, '<br>')}</p>
+        <br>
+        <p>Atentamente,</p>
+        <p><strong>El equipo de Club RAMPET</strong></p>
       </div>
     `;
 
+    // 4. Construir el mensaje para SendGrid
     const msg = {
       to: to,
-      // IMPORTANTE: Este debe ser un email que hayas verificado en tu cuenta de SendGrid
       from: {
-        email: process.env.SENDGRID_FROM_EMAIL,
-        name: 'Club RAMPET' // Puedes personalizar el nombre del remitente aquí
+        email: process.env.SENDGRID_FROM_EMAIL, // Email verificado en SendGrid
+        name: 'Club RAMPET'
       },
       subject: subject,
       html: htmlBody,
     };
 
+    // 5. Enviar el email
     await sgMail.send(msg);
     
     return res.status(200).json({ message: 'Email enviado con éxito a través de SendGrid.' });
