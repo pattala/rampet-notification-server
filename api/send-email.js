@@ -85,12 +85,4 @@ export default async function handler(req, res) {
   } else {
     return res.status(405).json({ message: `Método ${req.method} no permitido.` });
   }
-}```
-
-### Pasos Finales:
-
-1.  Asegúrate de que este código esté en tu archivo `api/send-email.js`.
-2.  Guarda y sube los cambios a Vercel para que se genere el último **deploy**.
-3.  Una vez terminado el despliegue, haz la prueba final desde **Live Server**.
-
-Ahora sí, con la clave API nueva y este código, todo el sistema de correos debería funcionar perfectamente, incluyendo el formato con el logo. ¡Estoy seguro de que esta vez funcionará
+}
