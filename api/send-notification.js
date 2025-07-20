@@ -2,7 +2,6 @@ const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
 
-// Usa el nombre correcto de tu variable de entorno
 const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
 
 try {
@@ -53,7 +52,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Se debe proporcionar "templateId" o "title" y "body".' });
     }
 
-    // --- CONSTRUCCIÓN DE MENSAJE RESTAURADA Y CON URL CORRECTA ---
+    // --- CORRECCIÓN DEFINITIVA: Se elimina el campo "data" ---
     const message = {
       notification: {
         title: title,
@@ -62,7 +61,7 @@ export default async function handler(req, res) {
       },
       tokens: tokens,
     };
-    // --- FIN DE LA SECCIÓN CRÍTICA ---
+    // -----------------------------------------------------------
 
     const response = await messaging.sendEachForMulticast(message);
     
