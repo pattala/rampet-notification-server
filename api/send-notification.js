@@ -1,3 +1,5 @@
+// api/send-notification.js (VERSIÓN FINAL CON LÓGICA DE VENCIMIENTO)
+
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
@@ -12,7 +14,7 @@ try {
 const db = getFirestore();
 const messaging = getMessaging();
 
-function replacePlaceholders(template, data = {}) { let result = template; for (const key in data) { result = result.replace(new RegExp(`{${key}}`, 'g'), data[key]); } return result; }
+// ---> Se elimina la antigua función replacePlaceholders
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -32,25 +34,50 @@ export default async function handler(req, res) {
     if (templateId) {
       const templateDoc = await db.collection('plantillas_mensajes').doc(templateId).get();
       if (!templateDoc.exists) { return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` }); }
+      
       const plantilla = templateDoc.data();
-      title = replacePlaceholders(plantilla.titulo, templateData);
-      body = replacePlaceholders(plantilla.cuerpo, templateData);
+      title = plantilla.titulo;
+      body = plantilla.cuerpo;
+
+      // ---> INICIO DE LA NUEVA LÓGICA
+      // 1. Lógica para construir el texto de vencimiento
+      let textoBloqueVencimiento = ''; // Por defecto, vacío
+      if (templateData && templateData.puntos_por_vencer && templateData.puntos_por_vencer > 0 && templateData.fecha_vencimiento) {
+          // Para notificaciones push, usamos un texto simple y directo.
+          textoBloqueVencimiento = ` ¡Atención! ${templateData.puntos_por_vencer} de tus puntos vencen el ${templateData.fecha_vencimiento}.`;
+      }
+      // 2. Reemplazamos el marcador de posición
+      body = body.replace('[BLOQUE_VENCIMIENTO]', textoBloqueVencimiento);
+
+      // 3. Reemplazamos el resto de las variables de forma segura
+      if (templateData) {
+        for (const key in templateData) {
+          const regex = new RegExp(`{${key}}`, 'g');
+          body = body.replace(regex, templateData[key] || '');
+          title = title.replace(regex, templateData[key] || '');
+        }
+      }
+      // ---> FIN DE LA NUEVA LÓGICA
+
     } else if (manualTitle && manualBody) {
+      // Para notificaciones manuales, no hay lógica de plantillas
       title = manualTitle;
       body = manualBody;
     } else {
       return res.status(400).json({ error: 'Se debe proporcionar "templateId" o "title" y "body".' });
     }
 
-    // ===== CAMBIO CLAVE: Enviamos la información en el campo "data" =====
+    // El cuerpo del mensaje de una notificación push no puede ser HTML.
+    // Si la plantilla contiene HTML, lo limpiamos para que solo quede el texto.
+    const cleanBody = body.replace(/<[^>]*>?/gm, ' '); // Elimina etiquetas HTML
+    
     const message = {
       data: {
         title: title,
-        body: body,
+        body: cleanBody, // Enviamos el texto limpio
       },
       tokens: tokens,
     };
-    // =================================================================
 
     const response = await messaging.sendEachForMulticast(message);
     
@@ -65,4 +92,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 }
-      
