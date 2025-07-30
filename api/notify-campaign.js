@@ -66,6 +66,7 @@ export default async function handler(req, res) {
     // 2. Preparar los datos que usaremos en las plantillas de mensajes
     const templateData = {
         nombre_campana: campana.nombre,
+        fecha_inicio_campana: new Date(campana.fechaInicio + 'T12:00:00Z').toLocaleDateString('es-ES', { timeZone: 'UTC' }),
         fecha_fin_campana: new Date(campana.fechaFin + 'T12:00:00Z').toLocaleDateString('es-ES', { timeZone: 'UTC' })
     };
     
