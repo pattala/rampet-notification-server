@@ -42,6 +42,7 @@ async function callInternalApi(endpoint, body) {
 
 // --- Handler Principal de la API ---
 export default async function handler(req, res) {
+console.log(`\n--- [${new Date().toISOString()}] INICIANDO /api/notify-campaign ---`);
   // Configuración de CORS y método (igual que en tus otros archivos)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
