@@ -1,4 +1,10 @@
 {
+  "crons": [
+    {
+      "path": "/api/procesar-cola-notificaciones",
+      "schedule": "*/10 * * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
