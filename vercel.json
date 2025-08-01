@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/procesar-cola-notificaciones",
-      "schedule": "*/10 * * * *"
+       "schedule": "5 9 * * *"
     }
   ],
   "headers": [
