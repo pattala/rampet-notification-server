@@ -1,7 +1,5 @@
 // ====================================================================
-// API: /api/enviar-notificacion-campana.js
-// Propósito: Recibe órdenes de QStash y ejecuta el envío final.
-// Seguridad: Protegido por firma de QStash.
+// API: /api/enviar-notificacion-campana.js (VERSIÓN FINAL Y COMPLETA)
 // ====================================================================
 
 import { verifySignature } from "@upstash/qstash/nextjs";
@@ -70,8 +68,6 @@ async function procesarNotificacionIndividual(trabajo) {
     let clientesFinales = [];
     if (destinatarios && destinatarios.length > 0) {
         console.log(`Enviando a grupo de prueba: ${destinatarios.join(', ')}`);
-        // Para hacer una búsqueda eficiente, necesitamos hacer varias consultas
-        // y luego unirlas.
         const todosLosClientesSnapshot = await db.collection('clientes').where('numeroSocio', '!=', null).get();
         const todosLosClientes = todosLosClientesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         clientesFinales = todosLosClientes.filter(c => 
@@ -92,17 +88,26 @@ async function procesarNotificacionIndividual(trabajo) {
     const todosLosTokens = [...new Set(clientesSuscritos.flatMap(c => c.fcmTokens || []))];
     const todosLosEmails = [...new Set(clientesSuscritos.map(c => c.email).filter(Boolean))];
 
-    // Envío Push masivo
+    // --- LÓGICA DE TEXTO DE VIGENCIA (Reutilizable para Push y Email) ---
+    let textoVigencia = '';
+    if (campanaData.fechaFin && campanaData.fechaFin !== '2100-01-01') {
+        textoVigencia = `Aprovecha los beneficios antes de que termine el ${new Date(campanaData.fechaFin).toLocaleDateString('es-ES')}.`;
+    } else {
+        textoVigencia = '¡Aprovecha los beneficios!';
+    }
+
+
+    // --- Envío Push masivo ---
     if (todosLosTokens.length > 0) {
-        const title = plantilla.titulo.replace(/{nombre_campana}/g, campanaData.nombre);
-        let body = plantilla.cuerpo
-              .replace(/{nombre}/g, nombreCliente)
-          .replace(/{nombre_campana}/g, campanaData.nombre)
+        let title = plantilla.titulo.replace(/{nombre_campana}/g, campanaData.nombre);
+        
+        let bodyPush = plantilla.cuerpo
+            .replace(/{nombre_campana}/g, campanaData.nombre)
             .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
             .replace(/{fecha_inicio}/g, new Date(campanaData.fechaInicio).toLocaleDateString('es-ES'))
-            .replace(/{fecha_fin}/g, new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
+            .replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
         
-        const cleanBody = body.replace(/<[^>]*>?/gm, ' ').replace(/{nombre}/g, 'tú');
+        const cleanBody = bodyPush.replace(/<[^>]*>?/gm, ' ').replace(/{nombre}/g, 'tú'); // Limpiar HTML y usar pronombre genérico
         
         await messaging.sendEachForMulticast({
             data: { title, body: cleanBody },
@@ -111,33 +116,25 @@ async function procesarNotificacionIndividual(trabajo) {
         console.log(`Push enviado para campaña ${campaignId} a ${todosLosTokens.length} tokens.`);
     }
 
-    // Envío de Emails
+    // --- Envío de Emails ---
     for (const email of todosLosEmails) {
         const cliente = clientesSuscritos.find(c => c.email === email);
         const nombreCliente = cliente ? cliente.nombre.split(' ')[0] : 'Cliente';
         
         let subject = plantilla.titulo.replace(/{nombre_campana}/g, campanaData.nombre);
-        let body = plantilla.cuerpo
+        
+        let bodyEmail = plantilla.cuerpo
             .replace(/{nombre}/g, nombreCliente)
             .replace(/{nombre_campana}/g, campanaData.nombre)
             .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
             .replace(/{fecha_inicio}/g, new Date(campanaData.fechaInicio).toLocaleDateString('es-ES'))
-            // Lógica condicional para la fecha de fin
-let textoVigencia = '';
-if (campanaData.fechaFin && campanaData.fechaFin !== '2100-01-01') {
-    // Si hay una fecha de fin REAL, creamos el texto.
-    textoVigencia = `Aprovecha los beneficios antes de que termine el ${new Date(campanaData.fechaFin).toLocaleDateString('es-ES')}. ¡Te esperamos!`;
-} else {
-    // Si no hay fecha de fin o es la fecha lejana, el texto es genérico.
-    textoVigencia = '¡Aprovecha los beneficios! ¡Te esperamos!';
-}
-        body = body.replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
+            .replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
       
         const htmlBody = `
             <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
                 <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo RAMPET" style="width: 150px; display: block; margin: 0 auto 20px auto;">
                 <h2 style="color: #0056b3;">${subject}</h2>
-                <div>${body.replace(/\n/g, '<br>')}</div>
+                <div>${bodyEmail.replace(/\n/g, '<br>')}</div>
                 <br>
                 <p>Atentamente,<br><strong>El equipo de Club RAMPET</strong></p>
             </div>`;
