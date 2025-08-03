@@ -1,38 +1,51 @@
-// api/programar-lanzamiento.js
+// ====================================================================
+// API: /api/programar-lanzamiento.js
+// Propósito: Recibe una orden del panel y la programa en QStash.
+// ====================================================================
+
 import { Client } from "@upstash/qstash";
 
+// Inicializamos el cliente de QStash con el token de publicación
 const qstashClient = new Client({ token: process.env.QSTASH_TOKEN });
 
 export default async function handler(req, res) {
-  // Manejar CORS y método POST
+  // Manejo de CORS y validación del método
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
   
-  // Seguridad básica (opcional pero recomendada)
+  // Seguridad: Verificamos que la llamada venga de nuestro panel
   if (req.headers.authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
     return res.status(401).json({ error: 'No autorizado' });
   }
 
   try {
-    const { campaignId, fechaNotificacion, destinatarios } = req.body;
-    if (!campaignId || !fechaNotificacion) {
-      return res.status(400).json({ error: 'Faltan campaignId o fechaNotificacion.' });
+    const { campaignId, fechaNotificacion, tipoNotificacion, destinatarios } = req.body;
+
+    // Validación de datos de entrada
+    if (!campaignId || !fechaNotificacion || !tipoNotificacion) {
+      return res.status(400).json({ error: 'Faltan datos requeridos (campaignId, fechaNotificacion, tipoNotificacion).' });
     }
 
-    // URL de nuestra API de envío real
-    const destinationUrl = `https://${process.env.VERCEL_URL}/api/enviar-notificacion-campana`;
+    // La URL de destino: nuestra otra API que hace el envío real
+    const destinationUrl = `https://${req.headers.host}/api/enviar-notificacion-campana`;
 
+    // Programamos el mensaje en QStash
     await qstashClient.publishJSON({
-      url: destinationUrl,
-      body: { campaignId, tipoNotificacion: 'lanzamiento', destinatarios },
-      // Programar el envío para la fecha exacta (en segundos UNIX)
+      // A dónde debe llamar QStash
+      url: destinationUrl, 
+      // Qué datos debe enviar en el cuerpo de la llamada
+      body: { campaignId, tipoNotificacion, destinatarios },
+      // Cuándo debe llamarla (en segundos UNIX)
       notBefore: Math.floor(new Date(fechaNotificacion).getTime() / 1000),
     });
 
-    res.status(202).json({ message: 'Lanzamiento programado con éxito.' });
+    res.status(202).json({ message: `Trabajo de tipo '${tipoNotificacion}' programado con éxito.` });
+
   } catch (error) {
     console.error("Error programando en QStash:", error);
-    res.status(500).json({ error: 'Error interno del servidor.' });
+    res.status(500).json({ error: 'Error interno del servidor al programar la tarea.' });
   }
 }
