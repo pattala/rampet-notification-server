@@ -109,8 +109,9 @@ async function procesarNotificacionIndividual(trabajo) {
     // Envío Push masivo
     if (todosLosTokens.length > 0) {
         const title = plantilla.titulo.replace('{nombre_campana}', campanaData.nombre);
-        let body = plantilla.cuerpo.replace('{nombre_campana}', campanaData.nombre)
-                                    .replace('{fecha_fin}', new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
+        let body = plantilla.cuerpo.replace(/{nombre_campana}/g, campanaData.nombre)
+                            .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
+                            .replace(/{fecha_fin}/g, new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
         
         const cleanBody = body.replace(/<[^>]*>?/gm, ' ').replace('{nombre}', 'tú'); // Limpiar HTML y placeholder de nombre
         
@@ -127,9 +128,10 @@ async function procesarNotificacionIndividual(trabajo) {
         const nombreCliente = cliente ? cliente.nombre.split(' ')[0] : 'Cliente';
         
         let subject = plantilla.titulo.replace('{nombre_campana}', campanaData.nombre);
-        let body = plantilla.cuerpo.replace('{nombre}', nombreCliente)
-                                    .replace('{nombre_campana}', campanaData.nombre)
-                                    .replace('{fecha_fin}', new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
+        let body = plantilla.cuerpo.replace(/{nombre}/g, nombreCliente)
+                            .replace(/{nombre_campana}/g, campanaData.nombre)
+                            .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
+                            .replace(/{fecha_fin}/g, new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
         
         const htmlBody = `
             <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
