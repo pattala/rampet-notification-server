@@ -96,7 +96,8 @@ async function procesarNotificacionIndividual(trabajo) {
     if (todosLosTokens.length > 0) {
         const title = plantilla.titulo.replace(/{nombre_campana}/g, campanaData.nombre);
         let body = plantilla.cuerpo
-            .replace(/{nombre_campana}/g, campanaData.nombre)
+              .replace(/{nombre}/g, nombreCliente)
+          .replace(/{nombre_campana}/g, campanaData.nombre)
             .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
             .replace(/{fecha_inicio}/g, new Date(campanaData.fechaInicio).toLocaleDateString('es-ES'))
             .replace(/{fecha_fin}/g, new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
@@ -121,8 +122,17 @@ async function procesarNotificacionIndividual(trabajo) {
             .replace(/{nombre_campana}/g, campanaData.nombre)
             .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
             .replace(/{fecha_inicio}/g, new Date(campanaData.fechaInicio).toLocaleDateString('es-ES'))
-            .replace(/{fecha_fin}/g, new Date(campanaData.fechaFin).toLocaleDateString('es-ES'));
-        
+            // Lógica condicional para la fecha de fin
+let textoVigencia = '';
+if (campanaData.fechaFin && campanaData.fechaFin !== '2100-01-01') {
+    // Si hay una fecha de fin REAL, creamos el texto.
+    textoVigencia = `Aprovecha los beneficios antes de que termine el ${new Date(campanaData.fechaFin).toLocaleDateString('es-ES')}. ¡Te esperamos!`;
+} else {
+    // Si no hay fecha de fin o es la fecha lejana, el texto es genérico.
+    textoVigencia = '¡Aprovecha los beneficios! ¡Te esperamos!';
+}
+        body = body.replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
+      
         const htmlBody = `
             <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
                 <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo RAMPET" style="width: 150px; display: block; margin: 0 auto 20px auto;">
