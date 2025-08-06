@@ -1,19 +1,20 @@
-// /api/set-admin-claim.js
+// /api/set-admin-claim.js - VERSIÓN CORREGIDA
 const admin = require('firebase-admin');
 
 // Leemos la clave secreta desde las variables de entorno de Vercel
 const MI_API_SECRET = process.env.API_SECRET_KEY; 
 
-// Inicializa la app de Firebase Admin si no lo ha hecho ya
+// --- INICIO DE LA CORRECCIÓN ---
+// Inicializa la app de Firebase Admin usando la variable GOOGLE_CREDENTIALS_JSON
 if (!admin.apps.length) {
+  // Primero, parseamos el JSON que viene como un string desde las variables de entorno
+  const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+
   admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    }),
+    credential: admin.credential.cert(serviceAccount),
   });
 }
+// --- FIN DE LA CORRECCIÓN ---
 
 export default async function handler(req, res) {
   // 1. Proteger el endpoint
