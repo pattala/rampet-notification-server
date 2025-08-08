@@ -121,7 +121,7 @@ export default async function handler(req, res) {
                 console.log("Cuerpo (Payload):", JSON.stringify(emailPayload));
 
                 // Realizamos la llamada fetch
-                fetch(sendEmailApiUrl, {
+                await fetch(sendEmailApiUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
