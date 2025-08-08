@@ -11,7 +11,22 @@ function initializeFirebaseAdmin() {
     }
     return admin.firestore();
 }
+// --- INICIO: LÓGICA DE CORS (REUTILIZADA) ---
+const allowedOrigins = [
+    'http://127.0.0.1:5500', // Tu servidor local
+    'http://localhost:5500',   // Otra forma de acceder localmente
+    // 'https://admin-rampet.vercel.app' 
+];
 
+function setCorsHeaders(req, res) {
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
+}
+// --- FIN: LÓGICA DE CORS ---
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Método no permitido.' });
