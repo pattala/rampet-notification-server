@@ -1,8 +1,7 @@
-// api/delete-user.js (Versión Limpia)
+// api/delete-user.js (Versión Final Híbrida)
 
 const admin = require('firebase-admin');
 
-// --- Helper para inicializar Firebase Admin ---
 function initializeFirebaseAdmin() {
     if (!admin.apps.length) {
         const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
@@ -14,7 +13,10 @@ function initializeFirebaseAdmin() {
 }
 
 export default async function handler(req, res) {
-    // La lógica de CORS y OPTIONS ha sido eliminada y centralizada en vercel.json
+    // RE-INTRODUCIDO: Manejo explícito de OPTIONS para un cortocircuito seguro.
+    if (req.method === 'OPTIONS') {
+        return res.status(204).send('');
+    }
     
     if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Método no permitido.' });
@@ -40,9 +42,8 @@ export default async function handler(req, res) {
                 console.log(`Usuario de Authentication ${authUID} eliminado.`);
             } catch (error) {
                 if (error.code === 'auth/user-not-found') {
-                    console.warn(`El usuario de Authentication ${authUID} no fue encontrado. Puede que ya haya sido eliminado.`);
+                    console.warn(`El usuario de Authentication ${authUID} no fue encontrado.`);
                 } else {
-                    // Loguear otros posibles errores sin detener el flujo principal
                     console.error(`Error al eliminar usuario de Authentication ${authUID}:`, error);
                 }
             }
