@@ -112,24 +112,54 @@ if (bonoBienvenida.activo && bonoBienvenida.puntos > 0) {
 
 await clienteRef.set(nuevoCliente);
 
+// ====================================================================
+// == INICIO: BLOQUE CORREGIDO (V2) CON MANEJO DE BONO DE BIENVENIDA ==
+// ====================================================================
 if (enviarBienvenida) {
-    const apiUrl = `https://${req.headers.host}/api/send-email`;
-    fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            cliente: { email, nombre, numeroSocio: nuevoNumeroSocio, puntos: nuevoCliente.puntos },
-            tipoPlantilla: 'bienvenida'
-        })
-    }).catch(err => console.error("Error al disparar email de bienvenida (creación manual):", err));
-}
+    const sendEmailApiUrl = `https://${req.headers.host}/api/send-email`;
+    const apiSecretKey = process.env.API_SECRET_KEY;
 
-return res.status(201).json({ message: 'Cliente creado con éxito.', numeroSocio: nuevoNumeroSocio });
-} catch (error) {
-console.error('Error en API /create-user:', error);
-if (error.code === 'auth/email-already-exists') {
-return res.status(409).json({ error: 'Conflicto: El email ya está registrado en el sistema de autenticación.' });
+    // 1. Definimos los datos base para la plantilla.
+    const templateData = {
+        nombre: nombre.split(' ')[0],
+        numero_socio: nuevoNumeroSocio,
+    };
+
+    // 2. AÑADIDO: Verificamos si se otorgaron puntos de bienvenida y los añadimos.
+    // Usamos el mismo objeto 'nuevoCliente' que ya tiene los puntos calculados.
+    if (nuevoCliente.puntos > 0) {
+        templateData.puntos_ganados = nuevoCliente.puntos;
+    }
+
+    // 3. Construimos el payload final para la API de email.
+    const emailPayload = {
+        to: email,
+        templateId: 'bienvenida', // El ID de la plantilla se mantiene
+        templateData: templateData // Ahora contiene los puntos si fueron asignados
+    };
+
+    // 4. Realizamos la llamada fetch sin cambios en esta parte.
+    fetch(sendEmailApiUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiSecretKey}`
+        },
+        body: JSON.stringify(emailPayload)
+    })
+    .then(response => {
+        if (!response.ok) {
+            response.json().then(err => {
+                 console.error(`Error al llamar a send-email API: ${response.status}`, err);
+            });
+        } else {
+             console.log("Llamada a send-email API para bienvenida realizada con éxito.");
+        }
+    })
+    .catch(err => {
+        console.error("Error de red al intentar disparar el email de bienvenida:", err);
+    });
 }
-return res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
-}
-}
+// ====================================================================
+// == FIN: BLOQUE CORREGIDO (V2)                                     ==
+// ====================================================================
