@@ -60,8 +60,8 @@ export default async function handler(req, res) {
                             <div>${body}</div><br>
                             <p>Atentamente,<br><strong>El equipo de Club RAMPET</strong></p>
                             <br>
-                            <br>
-                            <p>Atentamente,<br>Hipolito Yrigoyen 112, Martinez</p>
+                            <br>Hipolito Yrigoyen 112, Martinez</p>
+                           <br> 📞 (11) 3937-1215 </p>
                           </div>`;
 
         await sgMail.send({
