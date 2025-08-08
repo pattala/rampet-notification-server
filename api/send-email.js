@@ -1,4 +1,4 @@
-// api/send-email.js (VERSIÓN FINAL CON ENLACE A PWA)
+// api/send-email.js (VERSIÓN FINAL CON CREDENCIALES DINÁMICAS)
 
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
@@ -10,19 +10,13 @@ try {
     const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
     initializeApp({ credential: cert(serviceAccount) });
 } catch (e) {
-    if (e.code !== 'app/duplicate-app') {
-        console.error('Error inicializando Firebase Admin SDK:', e);
-    }
+    if (e.code !== 'app/duplicate-app') { console.error('Firebase init error:', e); }
 }
 const db = getFirestore();
 
 export default async function handler(req, res) {
-    if (req.method === 'OPTIONS') {
-        return res.status(204).send('');
-    }
-    if (req.method !== 'POST') {
-        return res.status(405).json({ message: `Método ${req.method} no permitido.` });
-    }
+    if (req.method === 'OPTIONS') { return res.status(204).send(''); }
+    if (req.method !== 'POST') { return res.status(405).json({ message: `Método ${req.method} no permitido.` }); }
 
     try {
         const providedToken = req.headers.authorization?.split('Bearer ')[1];
@@ -36,37 +30,37 @@ export default async function handler(req, res) {
         }
 
         const templateDoc = await db.collection('plantillas_mensajes').doc(templateId).get();
-        if (!templateDoc.exists) {
-            return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` });
-        }
+        if (!templateDoc.exists) { return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` }); }
 
         const plantilla = templateDoc.data();
         let subject = plantilla.titulo || 'Notificación de Club RAMPET';
         let body = plantilla.cuerpo || '';
-
-        // --- LÓGICA DE PROCESAMIENTO MEJORADA ---
-
-        // 1. Añadimos datos globales que siempre estarán disponibles
+        
         const fullTemplateData = {
             ...templateData,
-            pwa_url: process.env.PWA_URL || '#', // AÑADIDO
+            email: to, // Añadimos el email para poder usarlo en la plantilla
+            pwa_url: process.env.PWA_URL || '#',
             link_terminos: process.env.URL_TERMINOS_Y_CONDICIONES || '#'
         };
         
-        // 2. Procesamos bloques condicionales
+        // Procesamos bloque de PUNTOS
         body = body.replace(/\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g, (match, blockContent) => {
             return (fullTemplateData.puntos_ganados && fullTemplateData.puntos_ganados > 0) ? blockContent : '';
         });
 
-        // 3. Reemplazamos todas las variables {variable}
+        // Procesamos bloque de CREDENCIALES
+        body = body.replace(/\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g, (match, blockContent) => {
+            // Si la bandera 'creado_desde_panel' es true, dejamos el bloque. Si no, lo eliminamos.
+            return fullTemplateData.creado_desde_panel ? blockContent : '';
+        });
+
+        // Reemplazamos todas las variables {variable}
         for (const key in fullTemplateData) {
             const regex = new RegExp('{' + key + '}', 'g');
             body = body.replace(regex, fullTemplateData[key] || '');
             subject = subject.replace(regex, fullTemplateData[key] || '');
         }
         
-        // --- FIN DE LA LÓGICA ---
-
         const htmlBody = `<div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
                             <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo de RAMPET" style="width: 150px; display: block; margin: 0 auto 20px auto;">
                             <h2 style="color: #0056b3;">${subject}</h2>
