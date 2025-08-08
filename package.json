@@ -1,6 +1,7 @@
 {
   "name": "rampet-notification-server",
   "version": "1.0.0",
+  "type": "module",
   "description": "Serverless functions for RAMPET notifications.",
   "main": "index.js",
   "scripts": {
@@ -11,7 +12,7 @@
   },
   "dependencies": {
     "firebase-admin": "^12.1.0",
-   "@upstash/qstash": "^2.5.0",
+    "@upstash/qstash": "^2.5.0",
     "@sendgrid/mail": "^8.1.3"
   }
 }
