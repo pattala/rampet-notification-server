@@ -1,4 +1,4 @@
-// /api/create-user.js
+// /api/create-user.js (VERSIÓN FINAL, COMPLETA Y SEGURA)
 const admin = require('firebase-admin');
 
 // --- Helper para inicializar Firebase Admin ---
@@ -48,6 +48,22 @@ export default async function handler(req, res) {
         if (!dni || !nombre || !email) {
             return res.status(400).json({ error: 'DNI, Nombre y Email son obligatorios.' });
         }
+
+        // =================================================================
+        // == INICIO: CAPA DE SEGURIDAD CONTRA DUPLICADOS                 ==
+        // =================================================================
+        // Verificamos si ya existe un cliente en Firestore con ese email o DNI.
+        const emailQuery = await db.collection('clientes').where('email', '==', email).limit(1).get();
+        if (!emailQuery.empty) {
+            return res.status(409).json({ error: `Conflicto: El email '${email}' ya está en uso por otro cliente.` });
+        }
+        const dniQuery = await db.collection('clientes').where('dni', '==', dni).limit(1).get();
+        if (!dniQuery.empty) {
+            return res.status(409).json({ error: `Conflicto: El DNI '${dni}' ya está en uso por otro cliente.` });
+        }
+        // =================================================================
+        // == FIN: CAPA DE SEGURIDAD                                      ==
+        // =================================================================
 
         // 3. Creación del usuario en Firebase Authentication
         const userRecord = await admin.auth().createUser({
@@ -120,7 +136,7 @@ export default async function handler(req, res) {
         console.error('Error en API /create-user:', error);
         // Manejo de errores comunes
         if (error.code === 'auth/email-already-exists') {
-            return res.status(409).json({ error: 'Este email ya está registrado.' });
+            return res.status(409).json({ error: 'Conflicto: El email ya está registrado en el sistema de autenticación.' });
         }
         return res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
     }
