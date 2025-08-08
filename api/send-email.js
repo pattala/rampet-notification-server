@@ -1,4 +1,4 @@
-// api/send-email.js (VERSIÓN FINAL CON BLOQUES DINÁMICOS)
+// api/send-email.js (VERSIÓN FINAL CON ENLACE A PWA)
 
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
@@ -44,33 +44,33 @@ export default async function handler(req, res) {
         let subject = plantilla.titulo || 'Notificación de Club RAMPET';
         let body = plantilla.cuerpo || '';
 
-        // --- INICIO DE LA NUEVA LÓGICA DE PROCESAMIENTO ---
+        // --- LÓGICA DE PROCESAMIENTO MEJORADA ---
 
         // 1. Añadimos datos globales que siempre estarán disponibles
         const fullTemplateData = {
             ...templateData,
-            link_terminos: process.env.URL_TERMINOS_Y_CONDICIONES || '#' // Usa la variable de entorno o un '#' como fallback
+            pwa_url: process.env.PWA_URL || '#', // AÑADIDO
+            link_terminos: process.env.URL_TERMINOS_Y_CONDICIONES || '#'
         };
         
         // 2. Procesamos bloques condicionales
         body = body.replace(/\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g, (match, blockContent) => {
-            // Si 'puntos_ganados' existe y es mayor que 0, dejamos el bloque. Si no, lo eliminamos.
             return (fullTemplateData.puntos_ganados && fullTemplateData.puntos_ganados > 0) ? blockContent : '';
         });
 
-        // 3. Reemplazamos todas las variables {variable} de forma segura
+        // 3. Reemplazamos todas las variables {variable}
         for (const key in fullTemplateData) {
             const regex = new RegExp('{' + key + '}', 'g');
             body = body.replace(regex, fullTemplateData[key] || '');
             subject = subject.replace(regex, fullTemplateData[key] || '');
         }
-
-        // --- FIN DE LA NUEVA LÓGICA DE PROCESAMIENTO ---
+        
+        // --- FIN DE LA LÓGICA ---
 
         const htmlBody = `<div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
                             <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo de RAMPET" style="width: 150px; display: block; margin: 0 auto 20px auto;">
                             <h2 style="color: #0056b3;">${subject}</h2>
-                            <div>${body.replace(/\n/g, '<br>')}</div>
+                            <div>${body}</div>
                             <br>
                             <p>Atentamente,<br><strong>El equipo de Club RAMPET</strong></p>
                           </div>`;
