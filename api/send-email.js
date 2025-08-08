@@ -68,8 +68,13 @@ export default async function handler(req, res) {
             html: htmlBody
         });
         return res.status(200).json({ message: 'Email enviado con éxito.' });
-    } catch (error) {
-        console.error('Error en send-email:', error);
-        return res.status(500).json({ message: 'Error interno del servidor.', error: error.message });
+     // ...
+} catch (error) {
+    // AÑADIMOS ESTE COMENTARIO PARA FORZAR UN REDESPLIEGUE
+    console.error('Error fatal procesando el email:', error); 
+    if (error.response) { console.error(error.response.body); }
+    return res.status(500).json({ message: 'Error interno del servidor.', error: error.message });
+
+    
     }
 }
