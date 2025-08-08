@@ -59,6 +59,9 @@ export default async function handler(req, res) {
                             <h2 style="color: #0056b3;">${subject}</h2>
                             <div>${body}</div><br>
                             <p>Atentamente,<br><strong>El equipo de Club RAMPET</strong></p>
+                            <br>
+                            <br>
+                            <p>Atentamente,<br>Hipolito Yrigoyen 112, Martinez</p>
                           </div>`;
 
         await sgMail.send({
