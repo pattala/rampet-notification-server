@@ -1,4 +1,4 @@
-// api/create-user.js (Versión Final Híbrida)
+// api/create-user.js (Versión Final Híbrida - CON DEPURACIÓN)
 
 const admin = require('firebase-admin');
 
@@ -20,8 +20,6 @@ function getDiasCaducidad(puntos, reglasCaducidad) {
 }
 
 export default async function handler(req, res) {
-    // RE-INTRODUCIDO: Manejo explícito de OPTIONS para un cortocircuito seguro.
-    // vercel.json se encargará de añadir las cabeceras CORS correctas.
     if (req.method === 'OPTIONS') {
         return res.status(204).send('');
     }
@@ -84,34 +82,71 @@ export default async function handler(req, res) {
 
         await clienteRef.set(nuevoCliente);
 
+        // ====================================================================
+        // == INICIO: BLOQUE DE DEPURACIÓN PARA EL ENVÍO DE EMAIL            ==
+        // ====================================================================
         if (enviarBienvenida) {
+            console.log("Iniciando el proceso de envío de email de bienvenida...");
+
             const sendEmailApiUrl = `https://${req.headers.host}/api/send-email`;
             const apiSecretKey = process.env.API_SECRET_KEY;
 
-            const templateData = {
-                nombre: nombre.split(' ')[0],
-                numero_socio: nuevoNumeroSocio,
-            };
+            // --- PRUEBA DE HUMO 1: Verificar la clave secreta ---
+            console.log(`La clave secreta (API_SECRET_KEY) es: [${apiSecretKey}]`);
+            if (!apiSecretKey) {
+                console.error("¡ERROR CRÍTICO! La variable de entorno API_SECRET_KEY no está definida. Abortando envío de email.");
+            } else {
+                const templateData = {
+                    nombre: nombre.split(' ')[0],
+                    numero_socio: nuevoNumeroSocio,
+                };
 
-            if (nuevoCliente.puntos > 0) {
-                templateData.puntos_ganados = nuevoCliente.puntos;
-            }
+                if (nuevoCliente.puntos > 0) {
+                    templateData.puntos_ganados = nuevoCliente.puntos;
+                }
 
-            const emailPayload = {
-                to: email,
-                templateId: 'bienvenida',
-                templateData: templateData
-            };
+                const emailPayload = {
+                    to: email,
+                    templateId: 'bienvenida',
+                    templateData: templateData
+                };
 
-            fetch(sendEmailApiUrl, {
-                method: 'POST',
-                headers: {
+                // --- PRUEBA DE HUMO 2: Loguear todo lo que se va a enviar ---
+                console.log("Intentando llamar a la API de email con los siguientes datos:");
+                console.log("URL:", sendEmailApiUrl);
+                console.log("Cabeceras:", JSON.stringify({
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${apiSecretKey}`
-                },
-                body: JSON.stringify(emailPayload)
-            }).catch(err => console.error("Error asíncrono en fetch a send-email:", err));
+                }));
+                console.log("Cuerpo (Payload):", JSON.stringify(emailPayload));
+
+                // Realizamos la llamada fetch
+                fetch(sendEmailApiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiSecretKey}`
+                    },
+                    body: JSON.stringify(emailPayload)
+                })
+                .then(response => {
+                    console.log(`Respuesta recibida de send-email API. Status: ${response.status}`);
+                    if (!response.ok) {
+                        response.json().then(err => {
+                             console.error("Error en la respuesta de send-email API:", err);
+                        });
+                    } else {
+                         console.log("Llamada a send-email API parece haber sido exitosa.");
+                    }
+                })
+                .catch(err => {
+                    console.error("Error fatal en la llamada fetch a send-email:", err);
+                });
+            }
         }
+        // ====================================================================
+        // == FIN: BLOQUE DE DEPURACIÓN                                      ==
+        // ====================================================================
 
         return res.status(201).json({ message: 'Cliente creado con éxito.', numeroSocio: nuevoNumeroSocio });
 
