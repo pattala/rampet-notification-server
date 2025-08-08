@@ -1,6 +1,6 @@
-// api/delete-user.js (Versión Final Híbrida)
+// api/delete-user.js (Versión Final ESM)
 
-const admin = require('firebase-admin');
+import admin from 'firebase-admin';
 
 function initializeFirebaseAdmin() {
     if (!admin.apps.length) {
@@ -13,11 +13,9 @@ function initializeFirebaseAdmin() {
 }
 
 export default async function handler(req, res) {
-    // RE-INTRODUCIDO: Manejo explícito de OPTIONS para un cortocircuito seguro.
     if (req.method === 'OPTIONS') {
         return res.status(204).send('');
     }
-    
     if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Método no permitido.' });
     }
@@ -34,23 +32,17 @@ export default async function handler(req, res) {
         if (!clienteId) return res.status(400).json({ error: 'Falta el ID del documento del cliente.' });
 
         await db.collection('clientes').doc(clienteId).delete();
-        console.log(`Documento de Firestore ${clienteId} eliminado.`);
-
+        
         if (authUID) {
             try {
                 await admin.auth().deleteUser(authUID);
-                console.log(`Usuario de Authentication ${authUID} eliminado.`);
             } catch (error) {
-                if (error.code === 'auth/user-not-found') {
-                    console.warn(`El usuario de Authentication ${authUID} no fue encontrado.`);
-                } else {
-                    console.error(`Error al eliminar usuario de Authentication ${authUID}:`, error);
+                if (error.code !== 'auth/user-not-found') {
+                    console.error(`Error al eliminar usuario de Auth ${authUID}:`, error);
                 }
             }
         }
-
         return res.status(200).json({ message: 'Cliente eliminado con éxito.' });
-
     } catch (error) {
         console.error('Error en API /delete-user:', error);
         return res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
