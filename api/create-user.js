@@ -109,6 +109,7 @@ export default async function handler(req, res) {
                     to: email,
                     templateId: 'bienvenida',
                     templateData: templateData
+                    creado_desde_panel: true
                 };
 
                 // --- PRUEBA DE HUMO 2: Loguear todo lo que se va a enviar ---
