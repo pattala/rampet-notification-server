@@ -12,15 +12,18 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 // ---- CORS ----
-const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
 function applyCORS(req, res) {
   const origin = req.headers.origin || '';
-  if (origin && ALLOWED_ORIGINS.some(a => origin.startsWith(a))) {
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -93,18 +96,18 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'El cliente ya tenía número de socio. No se envió email.' });
     }
 
-    // --- Enviar email de bienvenida (server → server) ---
+    // --- Enviar email de bienvenida ---
     try {
       const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
       const r = await fetch(`${baseUrl}/api/send-email`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.MI_API_SECRET}` // configurado en Vercel
+          'Authorization': `Bearer ${process.env.MI_API_SECRET}`
         },
         body: JSON.stringify({
           to: datosClienteParaEmail.email,
-          templateId: 'bienvenida', // cambiá si usás otro ID
+          templateId: 'bienvenida',
           templateData: {
             nombre: datosClienteParaEmail.nombre,
             numero_socio: datosClienteParaEmail.numero_socio,
@@ -123,7 +126,6 @@ export default async function handler(req, res) {
       });
     } catch (err) {
       console.error('Error enviando email de bienvenida:', err);
-      // No cortamos la asignación si el mail falla
       return res.status(200).json({
         message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
         numeroSocio: datosClienteParaEmail.numero_socio,
