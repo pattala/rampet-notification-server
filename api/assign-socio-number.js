@@ -1,7 +1,7 @@
-// /api/assign-socio-number.js (VERSIÓN CON CORS + EMAIL DE BIENVENIDA)
+// /api/assign-socio-number.js (CORS + asigna N° socio + email bienvenida)
 const admin = require('firebase-admin');
 
-// Inicializa la app de Firebase Admin si no lo ha hecho ya
+// Inicializa Firebase Admin una sola vez
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
   admin.initializeApp({
@@ -12,13 +12,11 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 // ---- CORS ----
-const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,https://pattala.github.io')
-  .split(',')
-  .map(s => s.trim());
+const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 function applyCORS(req, res) {
   const origin = req.headers.origin || '';
-  if (ALLOWED_ORIGINS.some(a => origin.startsWith(a))) {
+  if (origin && ALLOWED_ORIGINS.some(a => origin.startsWith(a))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Vary', 'Origin');
@@ -26,13 +24,13 @@ function applyCORS(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (req.method === 'OPTIONS') {
     res.status(204).end();
-    return true; // preflight end
+    return true; // preflight
   }
   return false;
 }
 
 export default async function handler(req, res) {
-  if (applyCORS(req, res)) return; // maneja preflight OPTIONS
+  if (applyCORS(req, res)) return;
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método no permitido.' });
@@ -47,12 +45,13 @@ export default async function handler(req, res) {
     const contadorRef = db.collection('configuracion').doc('contadores');
     const clienteRef = db.collection('clientes').doc(docId);
 
-    // Guardamos datos para email fuera de la transacción
+    // Datos que vamos a usar para el email
     let datosClienteParaEmail = null;
 
-    await db.runTransaction(async (transaction) => {
-      const contadorDoc = await transaction.get(contadorRef);
-      const clienteDoc = await transaction.get(clienteRef);
+    // --- Transacción: asignar número de socio correlativo ---
+    await db.runTransaction(async (tx) => {
+      const contadorDoc = await tx.get(contadorRef);
+      const clienteDoc = await tx.get(clienteRef);
 
       if (!clienteDoc.exists) {
         throw new Error('El documento del cliente no existe.');
@@ -60,50 +59,48 @@ export default async function handler(req, res) {
 
       const clienteData = clienteDoc.data();
 
-      // Si ya tiene número, no reasignamos (y tampoco mandamos email)
+      // Si ya tenía número, salimos (no reenviamos email)
       if (clienteData.numeroSocio) {
-        console.log(`El cliente ${docId} ya tenía N° de Socio. No se hace nada.`);
+        console.log(`Cliente ${docId} ya tenía N° de Socio. Nada que hacer.`);
         return;
       }
 
-      // Tomamos datos básicos para el email (los completamos con el nro más abajo)
+      // Armar datos base para el email (completamos N° abajo)
       datosClienteParaEmail = {
+        id_cliente: docId,
         nombre: clienteData.nombre,
         email: clienteData.email,
-        puntos: clienteData.puntos || 0,
-        id_cliente: docId
+        puntos_ganados: clienteData.puntos || 0
       };
 
-      // Calcular nuevo número correlativo
       let nuevoNumeroSocio = 1;
       if (contadorDoc.exists && contadorDoc.data().ultimoNumeroSocio) {
         nuevoNumeroSocio = contadorDoc.data().ultimoNumeroSocio + 1;
       }
 
-      // Actualizar contador y asignar al cliente
-      transaction.set(contadorRef, { ultimoNumeroSocio: nuevoNumeroSocio }, { merge: true });
-      transaction.update(clienteRef, { numeroSocio: nuevoNumeroSocio });
+      // Actualizar contador y cliente
+      tx.set(contadorRef, { ultimoNumeroSocio: nuevoNumeroSocio }, { merge: true });
+      tx.update(clienteRef, { numeroSocio: nuevoNumeroSocio });
 
-      // Completar datos para email
+      // Guardar N° para el email
       datosClienteParaEmail.numero_socio = nuevoNumeroSocio;
 
-      console.log(`Asignado N° de Socio ${nuevoNumeroSocio} al cliente con docId: ${docId}`);
+      console.log(`Asignado N° de Socio ${nuevoNumeroSocio} al cliente ${docId}`);
     });
 
-    // Si no hay datos (p.ej. ya tenía número), devolvemos OK sin enviar email
+    // Si no hubo cambios (ya tenía N°), devolvemos OK
     if (!datosClienteParaEmail) {
       return res.status(200).json({ message: 'El cliente ya tenía número de socio. No se envió email.' });
     }
 
-    // ---- Envío de email de bienvenida (server-side) ----
+    // --- Enviar email de bienvenida (server → server) ---
     try {
       const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
       const r = await fetch(`${baseUrl}/api/send-email`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          // Validación con secreto del lado del servidor
-          'Authorization': `Bearer ${process.env.MI_API_SECRET}`
+          'Authorization': `Bearer ${process.env.MI_API_SECRET}` // configurado en Vercel
         },
         body: JSON.stringify({
           to: datosClienteParaEmail.email,
@@ -111,22 +108,22 @@ export default async function handler(req, res) {
           templateData: {
             nombre: datosClienteParaEmail.nombre,
             numero_socio: datosClienteParaEmail.numero_socio,
-            puntos_ganados: datosClienteParaEmail.puntos || 0,
+            puntos_ganados: datosClienteParaEmail.puntos_ganados,
             id_cliente: datosClienteParaEmail.id_cliente
           }
         })
       });
 
       const mailResp = await r.json().catch(() => ({}));
-      // No cortamos el flujo si hubo problema con el email
+
       return res.status(200).json({
         message: 'Número de socio asignado y email de bienvenida enviado (o encolado).',
         numeroSocio: datosClienteParaEmail.numero_socio,
         mail: mailResp
       });
     } catch (err) {
-      console.error('Error al enviar email de bienvenida:', err);
-      // Continuamos, pero avisamos en la respuesta
+      console.error('Error enviando email de bienvenida:', err);
+      // No cortamos la asignación si el mail falla
       return res.status(200).json({
         message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
         numeroSocio: datosClienteParaEmail.numero_socio,
