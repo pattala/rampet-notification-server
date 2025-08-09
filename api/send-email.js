@@ -1,20 +1,21 @@
-// /api/send-email.js (ESM + CORS + Bearer auth + SendGrid)
-
+// /api/send-email.js (ESM + CORS + auth flexible + SendGrid)
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
 import sgMail from '@sendgrid/mail';
 
-// --- Init Firebase Admin (ESM) ---
+// --- Init Firebase Admin ---
 if (!getApps().length) {
   const creds = process.env.GOOGLE_CREDENTIALS_JSON
     ? JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON)
     : null;
   if (creds) initializeApp({ credential: cert(creds) });
-  else initializeApp(); // fallback si usás ADC (no recomendado)
+  else initializeApp();
 }
 const db = getFirestore();
+const adminAuth = getAuth();
 
-// --- Init SendGrid ---
+// --- SendGrid ---
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // --- CORS ---
@@ -35,17 +36,37 @@ function cors(req, res) {
   return false;
 }
 
+async function isAuthorized(req) {
+  const origin = req.headers.origin || '';
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+
+  // 1) Secreto de servidor a servidor
+  if (token && token === process.env.MI_API_SECRET) return true;
+
+  // 2) idToken Firebase (admin o usuario autenticado)
+  if (token) {
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      // si querés exigir admin: if (!decoded.admin) return false;
+      return !!decoded;
+    } catch { /* sigue abajo */ }
+  }
+
+  // 3) Fallback temporal: permitir sin Authorization si el origin está permitido
+  if (ALLOWED.includes(origin)) return true;
+
+  return false;
+}
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
-
   if (req.method !== 'POST') {
     return res.status(405).json({ message: `Método ${req.method} no permitido.` });
   }
 
-  // --- Bearer auth con MI_API_SECRET ---
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-  if (!token || token !== process.env.MI_API_SECRET) {
+  // Auth flexible
+  if (!(await isAuthorized(req))) {
     return res.status(401).json({ message: 'No autorizado.' });
   }
 
@@ -55,7 +76,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ message: 'Faltan parámetros: to y templateId son requeridos.' });
     }
 
-    // Cargar plantilla desde Firestore
+    // Plantilla desde Firestore
     const snap = await db.collection('plantillas_mensajes').doc(templateId).get();
     if (!snap.exists) {
       return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` });
@@ -72,15 +93,11 @@ export default async function handler(req, res) {
       link_terminos: process.env.URL_TERMINOS_Y_CONDICIONES || '#'
     };
 
-    // Bloques condicionales por etiquetas
-    body = body.replace(
-      /\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
-      (_, block) => (Number(full.puntos_ganados) > 0 ? block : '')
-    );
-    body = body.replace(
-      /\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
-      (_, block) => (full.creado_desde_panel ? block : '')
-    );
+    // Bloques condicionales
+    body = body.replace(/\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
+      (_, block) => (Number(full.puntos_ganados) > 0 ? block : ''));
+    body = body.replace(/\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
+      (_, block) => (full.creado_desde_panel ? block : ''));
 
     // Reemplazos {clave}
     for (const k of Object.keys(full)) {
@@ -98,8 +115,7 @@ export default async function handler(req, res) {
         <p>Atentamente,<br><strong>El equipo de Club RAMPET</strong></p>
         <br>Hipólito Yrigoyen 112, Martínez
         <br>📞 (11) 3937-1215
-      </div>
-    `;
+      </div>`;
 
     await sgMail.send({
       to,
