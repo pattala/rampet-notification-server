@@ -38,7 +38,7 @@ function isAuthorized(req) {
 
 // ---- Config push
 const PWA_URL   = process.env.PWA_URL || 'https://rampet.vercel.app';
-const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo_192.png`;
+const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo.png`;   // <- CAMBIO: usar mi_logo.png
 const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
 
 // Alias cómodos (si mandás { tipo: 'compra' } en vez de templateId)
