@@ -41,16 +41,20 @@ async function isAuthorized(req) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
 
-  // 1) Secreto de servidor a servidor
-  if (token && token === process.env.MI_API_SECRET) return true;
+  // 1) Secreto server→server (acepta API_SECRET_KEY y, por compatibilidad, MI_API_SECRET)
+  if (token && (token === process.env.API_SECRET_KEY || token === process.env.MI_API_SECRET)) {
+    return true;
+  }
 
-  // 2) idToken Firebase (admin o usuario autenticado)
+  // 2) idToken de Firebase (si alguna vez lo usás desde el panel)
   if (token) {
     try {
       const decoded = await adminAuth.verifyIdToken(token);
-      // si querés exigir admin: if (!decoded.admin) return false;
+      // Si quisieras exigir rol admin: if (!decoded.admin) return false;
       return !!decoded;
-    } catch { /* sigue abajo */ }
+    } catch {
+      /* sigue abajo */
+    }
   }
 
   // 3) Fallback temporal: permitir sin Authorization si el origin está permitido
@@ -61,6 +65,7 @@ async function isAuthorized(req) {
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
+
   if (req.method !== 'POST') {
     return res.status(405).json({ message: `Método ${req.method} no permitido.` });
   }
@@ -94,10 +99,20 @@ export default async function handler(req, res) {
     };
 
     // Bloques condicionales
-    body = body.replace(/\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
-      (_, block) => (Number(full.puntos_ganados) > 0 ? block : ''));
-    body = body.replace(/\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
-      (_, block) => (full.creado_desde_panel ? block : ''));
+    body = body.replace(
+      /\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
+      (_, block) => (Number(full.puntos_ganados) > 0 ? block : '')
+    );
+    body = body.replace(
+      /\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
+      (_, block) => (full.creado_desde_panel ? block : '')
+    );
+
+    // Marcador simple de vencimiento (si viene texto)
+    body = body.replace(
+      /\[BLOQUE_VENCIMIENTO\]/g,
+      full.vencimiento_text ? `<p>Vencen el: <strong>${full.vencimiento_text}</strong></p>` : ''
+    );
 
     // Reemplazos {clave}
     for (const k of Object.keys(full)) {
