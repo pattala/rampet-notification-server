@@ -1,4 +1,4 @@
-// /api/assign-socio-number.js  (ESM + CORS + asigna N° socio + email bienvenida)
+ // /api/assign-socio-number.js  (ESM + CORS + asigna N° socio + email bienvenida)
 import admin from 'firebase-admin';
 
 // Inicializa Firebase Admin una sola vez
