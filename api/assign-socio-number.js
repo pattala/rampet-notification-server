@@ -106,7 +106,7 @@ export default async function handler(req, res) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.MI_API_SECRET}` // definido en Vercel
+          'Authorization': `Bearer ${process.env.API_API_SECRET}` // definido en Vercel
         },
         body: JSON.stringify({
           to: datosClienteParaEmail.email,
