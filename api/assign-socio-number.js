@@ -101,24 +101,25 @@ export default async function handler(req, res) {
 
     // --- Enviar email de bienvenida (server → server) ---
     try {
-      const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
-      const r = await fetch(`${baseUrl}/api/send-email`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.API_API_SECRET}` // definido en Vercel
-        },
-        body: JSON.stringify({
-          to: datosClienteParaEmail.email,
-          templateId: 'bienvenida', // cambialo si tu ID es otro
-          templateData: {
-            nombre: datosClienteParaEmail.nombre,
-            numero_socio: datosClienteParaEmail.numero_socio,
-            puntos_ganados: datosClienteParaEmail.puntos_ganados,
-            id_cliente: datosClienteParaEmail.id_cliente,
-          }
-        })
-      });
+     const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
+const r = await fetch(`${baseUrl}/api/send-email`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${process.env.API_SECRET_KEY}` // <- nombre correcto
+  },
+  body: JSON.stringify({
+    to: datosClienteParaEmail.email,
+    templateId: 'bienvenida',
+    templateData: {
+      nombre: datosClienteParaEmail.nombre,
+      numero_socio: datosClienteParaEmail.numero_socio,
+      puntos_ganados: datosClienteParaEmail.puntos_ganados,
+      id_cliente: datosClienteParaEmail.id_cliente,
+    }
+  })
+});
+
 
       const mailResp = await r.json().catch(() => ({}));
       return res.status(200).json({
