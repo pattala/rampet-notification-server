@@ -1,4 +1,4 @@
-// /api/send-email.js (ESM + CORS + auth flexible + SendGrid)
+// /api/send-email.js (ESM + CORS + auth flexible + SendGrid + debug 401)
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
@@ -36,31 +36,29 @@ function cors(req, res) {
   return false;
 }
 
-async function isAuthorized(req) {
+async function authCheck(req) {
   const origin = req.headers.origin || '';
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
 
   // 1) Secreto server→server (acepta API_SECRET_KEY y, por compatibilidad, MI_API_SECRET)
   if (token && (token === process.env.API_SECRET_KEY || token === process.env.MI_API_SECRET)) {
-    return true;
+    return { ok: true, mode: 'secret' };
   }
 
-  // 2) idToken de Firebase (si alguna vez lo usás desde el panel)
+  // 2) idToken Firebase (por si lo usás desde el panel a futuro)
   if (token) {
     try {
       const decoded = await adminAuth.verifyIdToken(token);
-      // Si quisieras exigir rol admin: if (!decoded.admin) return false;
-      return !!decoded;
-    } catch {
-      /* sigue abajo */
-    }
+      if (decoded) return { ok: true, mode: 'idToken' };
+    } catch { /* sigue abajo */ }
   }
 
   // 3) Fallback temporal: permitir sin Authorization si el origin está permitido
-  if (ALLOWED.includes(origin)) return true;
+  if (ALLOWED.includes(origin)) return { ok: true, mode: 'origin' };
 
-  return false;
+  // Motivo de 401 para debug
+  return { ok: false, reason: token ? 'token-mismatch' : 'no-auth-header', origin };
 }
 
 export default async function handler(req, res) {
@@ -70,8 +68,9 @@ export default async function handler(req, res) {
     return res.status(405).json({ message: `Método ${req.method} no permitido.` });
   }
 
-  // Auth flexible
-  if (!(await isAuthorized(req))) {
+  const auth = await authCheck(req);
+  if (!auth.ok) {
+    console.warn('send-email unauthorized', { reason: auth.reason, origin: auth.origin || null });
     return res.status(401).json({ message: 'No autorizado.' });
   }
 
@@ -107,8 +106,7 @@ export default async function handler(req, res) {
       /\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
       (_, block) => (full.creado_desde_panel ? block : '')
     );
-
-    // Marcador simple de vencimiento (si viene texto)
+    // Marcador simple de vencimiento (si viene texto), p.ej. en emails de compra
     body = body.replace(
       /\[BLOQUE_VENCIMIENTO\]/g,
       full.vencimiento_text ? `<p>Vencen el: <strong>${full.vencimiento_text}</strong></p>` : ''
