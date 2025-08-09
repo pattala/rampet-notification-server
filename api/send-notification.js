@@ -1,4 +1,4 @@
-// /api/send-notification.js (ESM + CORS + auth flexible + FCM + limpia tokens inválidos)
+// /api/send-notification.js (ESM + CORS + auth flexible + FCM + plantillas + icon)
 import admin from 'firebase-admin';
 
 if (!admin.apps.length) {
@@ -11,7 +11,7 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const messaging = admin.messaging();
 
-// ---- CORS (igual que send-email)
+// ---- CORS
 const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
@@ -32,13 +32,40 @@ function isAuthorized(req) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
 
-  // Server→server
+  // server→server
   if (token && (token === process.env.API_SECRET_KEY || token === process.env.MI_API_SECRET)) return true;
-
-  // Fallback: permitir panel por Origin
+  // panel por CORS
   if (ALLOWED.includes(origin)) return true;
 
   return false;
+}
+
+// ---- helpers
+const PWA_URL   = process.env.PWA_URL || 'https://rampet.vercel.app';
+const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo_192.png`;
+const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
+
+// Resuelve una plantilla desde plantillas_push o plantillas_mensajes
+async function resolveTemplate(templateId, templateData = {}) {
+  const cols = ['plantillas_push', 'plantillas_mensajes'];
+  for (const col of cols) {
+    const doc = await db.collection(col).doc(templateId).get();
+    if (doc.exists) {
+      const t = doc.data() || {};
+      let title = t.titulo_push || t.titulo || 'Club RAMPET';
+      let body  = t.cuerpo_push || t.cuerpo || '';
+
+      for (const [k, v] of Object.entries(templateData)) {
+        const rx = new RegExp('\\{' + k + '\\}', 'g');
+        title = title.replace(rx, String(v ?? ''));
+        body  = body.replace(rx, String(v ?? ''));
+      }
+      // El cuerpo del push debe ser texto plano
+      body = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      return { title, body, image: t.imagen_push || null };
+    }
+  }
+  return null;
 }
 
 export default async function handler(req, res) {
@@ -47,29 +74,50 @@ export default async function handler(req, res) {
   if (!isAuthorized(req)) return res.status(401).json({ message: 'No autorizado.' });
 
   try {
-    const { title, body, data, tokens, clienteId } = req.body || {};
+    const { title, body, data, tokens, clienteId, templateId, templateData } = req.body || {};
 
-    // Resolver tokens
+    // 1) Resolver tokens
     let tokenList = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
-    if (!tokenList.length && clienteId) {
-      const snap = await db.collection('clientes').doc(clienteId).get();
+    let targetClientId = clienteId || null;
+
+    if (!tokenList.length && targetClientId) {
+      const snap = await db.collection('clientes').doc(targetClientId).get();
       if (!snap.exists) return res.status(404).json({ message: 'Cliente no encontrado.' });
       tokenList = (snap.data().fcmTokens || []).filter(Boolean);
     }
     if (!tokenList.length) return res.status(400).json({ message: 'No hay tokens para enviar.' });
 
-    // Mensaje
+    // 2) Resolver contenido (plantilla o texto directo)
+    let notifTitle = title || 'Club RAMPET';
+    let notifBody  = body  || 'Tienes novedades';
+    let notifImage = null;
+
+    if (templateId) {
+      const tpl = await resolveTemplate(templateId, templateData);
+      if (tpl) {
+        notifTitle = tpl.title;
+        notifBody  = tpl.body;
+        notifImage = tpl.image || null;
+      }
+    }
+
+    // 3) Armar mensaje webpush con icon/badge
+    const webpushNotif = { title: notifTitle, body: notifBody, icon: ICON_URL, badge: BADGE_URL };
+    if (notifImage) webpushNotif.image = notifImage;
+
     const msg = {
-      notification: { title: title || 'Club RAMPET', body: body || 'Tienes novedades' },
-      data: Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [String(k), String(v ?? '')])),
       tokens: tokenList,
-      webpush: { fcmOptions: { link: process.env.PWA_URL || 'https://rampet.vercel.app' } },
+      data: Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [String(k), String(v ?? '')])),
+      webpush: {
+        notification: webpushNotif,
+        fcmOptions: { link: PWA_URL },
+      },
     };
 
-    // Enviar
+    // 4) Enviar
     const resp = await messaging.sendEachForMulticast(msg);
 
-    // Limpiar tokens inválidos
+    // 5) Limpiar tokens inválidos
     const invalid = [];
     resp.responses.forEach((r, i) => {
       if (!r.success) {
@@ -79,8 +127,8 @@ export default async function handler(req, res) {
         }
       }
     });
-    if (clienteId && invalid.length) {
-      await db.collection('clientes').doc(clienteId).update({
+    if (targetClientId && invalid.length) {
+      await db.collection('clientes').doc(targetClientId).update({
         fcmTokens: admin.firestore.FieldValue.arrayRemove(...invalid),
       });
     }
