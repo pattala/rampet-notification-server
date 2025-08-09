@@ -1,4 +1,4 @@
-// /api/send-notification.js (ESM + CORS + auth flexible + FCM + plantillas + icon)
+// /api/send-notification.js (push con plantillas, bloques, icon y CORS)
 import admin from 'firebase-admin';
 
 if (!admin.apps.length) {
@@ -13,9 +13,7 @@ const messaging = admin.messaging();
 
 // ---- CORS
 const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 function cors(req, res) {
   const origin = req.headers.origin || '';
@@ -31,38 +29,67 @@ function isAuthorized(req) {
   const origin = req.headers.origin || '';
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-
   // server→server
   if (token && (token === process.env.API_SECRET_KEY || token === process.env.MI_API_SECRET)) return true;
   // panel por CORS
   if (ALLOWED.includes(origin)) return true;
-
   return false;
 }
 
-// ---- helpers
+// ---- Config push
 const PWA_URL   = process.env.PWA_URL || 'https://rampet.vercel.app';
 const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo_192.png`;
 const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
+
+// Alias cómodos (si mandás { tipo: 'compra' } en vez de templateId)
+const TEMPLATE_ALIASES = {
+  compra: 'push_compra',
+  puntos: 'push_puntos',
+  bono: 'push_bono_especial',
+  bienvenida: 'bienvenida_push',
+};
+
+// Aplica bloques y reemplazos
+function applyBlocksAndVars(text, data) {
+  let out = text || '';
+
+  // Bloques condicionales (mismos que en email, los que te afectan al push)
+  out = out.replace(
+    /\[BLOQUE_VENCIMIENTO\]/g,
+    data?.vencimiento_text ? `Vencen el: ${data.vencimiento_text}` : ''
+  );
+  out = out.replace(
+    /\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
+    (_, block) => (Number(data?.puntos_ganados) > 0 ? block : '')
+  );
+  out = out.replace(
+    /\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
+    '' // normalmente esto no va en push
+  );
+
+  // Reemplazo {clave}
+  for (const [k, v] of Object.entries(data || {})) {
+    out = out.replace(new RegExp('\\{' + k + '\\}', 'g'), String(v ?? ''));
+  }
+
+  // El cuerpo del push debe ser texto plano
+  out = out.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return out;
+}
 
 // Resuelve una plantilla desde plantillas_push o plantillas_mensajes
 async function resolveTemplate(templateId, templateData = {}) {
   const cols = ['plantillas_push', 'plantillas_mensajes'];
   for (const col of cols) {
-    const doc = await db.collection(col).doc(templateId).get();
-    if (doc.exists) {
-      const t = doc.data() || {};
+    const snap = await db.collection(col).doc(templateId).get();
+    if (snap.exists) {
+      const t = snap.data() || {};
       let title = t.titulo_push || t.titulo || 'Club RAMPET';
       let body  = t.cuerpo_push || t.cuerpo || '';
-
-      for (const [k, v] of Object.entries(templateData)) {
-        const rx = new RegExp('\\{' + k + '\\}', 'g');
-        title = title.replace(rx, String(v ?? ''));
-        body  = body.replace(rx, String(v ?? ''));
-      }
-      // El cuerpo del push debe ser texto plano
-      body = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      return { title, body, image: t.imagen_push || null };
+      title = applyBlocksAndVars(title, templateData);
+      body  = applyBlocksAndVars(body,  templateData);
+      const image = t.imagen_push || null;
+      return { title, body, image };
     }
   }
   return null;
@@ -74,9 +101,14 @@ export default async function handler(req, res) {
   if (!isAuthorized(req)) return res.status(401).json({ message: 'No autorizado.' });
 
   try {
-    const { title, body, data, tokens, clienteId, templateId, templateData } = req.body || {};
+    let { title, body, data, tokens, clienteId, templateId, templateData, tipo } = req.body || {};
 
-    // 1) Resolver tokens
+    // Resolver alias de plantilla (si vino "tipo")
+    if (!templateId && tipo && TEMPLATE_ALIASES[tipo]) {
+      templateId = TEMPLATE_ALIASES[tipo];
+    }
+
+    // 1) Tokens destino
     let tokenList = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
     let targetClientId = clienteId || null;
 
@@ -87,7 +119,7 @@ export default async function handler(req, res) {
     }
     if (!tokenList.length) return res.status(400).json({ message: 'No hay tokens para enviar.' });
 
-    // 2) Resolver contenido (plantilla o texto directo)
+    // 2) Contenido (plantilla o texto directo)
     let notifTitle = title || 'Club RAMPET';
     let notifBody  = body  || 'Tienes novedades';
     let notifImage = null;
@@ -99,9 +131,13 @@ export default async function handler(req, res) {
         notifBody  = tpl.body;
         notifImage = tpl.image || null;
       }
+    } else {
+      // Si mandaste title/body “crudos”, por las dudas aplicar reemplazos
+      notifTitle = applyBlocksAndVars(notifTitle, templateData);
+      notifBody  = applyBlocksAndVars(notifBody,  templateData);
     }
 
-    // 3) Armar mensaje webpush con icon/badge
+    // 3) Mensaje webpush con icon/badge (logo)
     const webpushNotif = { title: notifTitle, body: notifBody, icon: ICON_URL, badge: BADGE_URL };
     if (notifImage) webpushNotif.image = notifImage;
 
