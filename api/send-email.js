@@ -107,10 +107,9 @@ export default async function handler(req, res) {
       (_, block) => (full.creado_desde_panel ? block : '')
     );
     // Marcador simple de vencimiento (si viene texto), p.ej. en emails de compra
-    body = body.replace(
-      /\[BLOQUE_VENCIMIENTO\]/g,
-      full.vencimiento_text ? `<p>Vencen el: <strong>${full.vencimiento_text}</strong></p>` : ''
-    );
+    body = body.replace(/\[BLOQUE_VENCIMIENTO\]([\s\S]*?)\[\/BLOQUE_VENCIMIENTO\]/g,
+  (_, block) => (full.vencimiento_text ? block : '')
+);
 
     // Reemplazos {clave}
     for (const k of Object.keys(full)) {
