@@ -54,10 +54,9 @@ function applyBlocksAndVars(text, data) {
   let out = text || '';
 
   // Bloques condicionales (mismos que en email, los que te afectan al push)
-  out = out.replace(
-    /\[BLOQUE_VENCIMIENTO\]/g,
-    data?.vencimiento_text ? `Vencen el: ${data.vencimiento_text}` : ''
-  );
+  out = out.replace(/\[BLOQUE_VENCIMIENTO\]([\s\S]*?)\[\/BLOQUE_VENCIMIENTO\]/g,
+  (_, block) => (data?.vencimiento_text ? block : '')
+);
   out = out.replace(
     /\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
     (_, block) => (Number(data?.puntos_ganados) > 0 ? block : '')
