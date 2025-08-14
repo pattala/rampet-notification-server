@@ -1,6 +1,6 @@
 // /api/send-notification.js
 import admin from 'firebase-admin';
-
+import { resolveTemplate, applyBlocksAndVars, sanitizePush } from '../utils/templates.js';
 if (!admin.apps.length) {
   const creds = process.env.GOOGLE_CREDENTIALS_JSON
     ? JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON)
