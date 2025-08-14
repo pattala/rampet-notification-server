@@ -1,4 +1,3 @@
-// /api/send-email.js (ESM + CORS + auth flexible + SendGrid + debug 401)
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
@@ -41,23 +40,19 @@ async function authCheck(req) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
 
-  // 1) Secreto server→server (acepta API_SECRET_KEY y, por compatibilidad, MI_API_SECRET)
   if (token && (token === process.env.API_SECRET_KEY || token === process.env.MI_API_SECRET)) {
     return { ok: true, mode: 'secret' };
   }
 
-  // 2) idToken Firebase (por si lo usás desde el panel a futuro)
   if (token) {
     try {
       const decoded = await adminAuth.verifyIdToken(token);
       if (decoded) return { ok: true, mode: 'idToken' };
-    } catch { /* sigue abajo */ }
+    } catch { }
   }
 
-  // 3) Fallback temporal: permitir sin Authorization si el origin está permitido
   if (ALLOWED.includes(origin)) return { ok: true, mode: 'origin' };
 
-  // Motivo de 401 para debug
   return { ok: false, reason: token ? 'token-mismatch' : 'no-auth-header', origin };
 }
 
@@ -80,7 +75,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ message: 'Faltan parámetros: to y templateId son requeridos.' });
     }
 
-    // Plantilla desde Firestore
     const snap = await db.collection('plantillas_mensajes').doc(templateId).get();
     if (!snap.exists) {
       return res.status(404).json({ message: `Plantilla '${templateId}' no encontrada.` });
@@ -97,7 +91,6 @@ export default async function handler(req, res) {
       link_terminos: process.env.URL_TERMINOS_Y_CONDICIONES || '#'
     };
 
-    // Bloques condicionales
     body = body.replace(
       /\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
       (_, block) => (Number(full.puntos_ganados) > 0 ? block : '')
@@ -106,12 +99,11 @@ export default async function handler(req, res) {
       /\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
       (_, block) => (full.creado_desde_panel ? block : '')
     );
-    // Marcador simple de vencimiento (si viene texto), p.ej. en emails de compra
-    body = body.replace(/\[BLOQUE_VENCIMIENTO\]([\s\S]*?)\[\/BLOQUE_VENCIMIENTO\]/g,
-  (_, block) => (full.vencimiento_text ? block : '')
-);
+    body = body.replace(
+      /\[BLOQUE_VENCIMIENTO\]([\s\S]*?)\[\/BLOQUE_VENCIMIENTO\]/g,
+      (_, block) => (full.vencimiento_text ? block : '')
+    );
 
-    // Reemplazos {clave}
     for (const k of Object.keys(full)) {
       const val = full[k] ?? '';
       const rx = new RegExp('\\{' + k + '\\}', 'g');
