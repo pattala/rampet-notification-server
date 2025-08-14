@@ -1,3 +1,4 @@
+import { resolveTemplate, applyBlocksAndVars, sanitizePush } from '../utils/templates.js';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
