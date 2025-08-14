@@ -1,4 +1,4 @@
-// /api/send-notification.js (push con plantillas, bloques, icon y CORS)
+// /api/send-notification.js
 import admin from 'firebase-admin';
 
 if (!admin.apps.length) {
@@ -8,6 +8,7 @@ if (!admin.apps.length) {
   if (creds) admin.initializeApp({ credential: admin.credential.cert(creds) });
   else admin.initializeApp();
 }
+
 const db = admin.firestore();
 const messaging = admin.messaging();
 
@@ -38,7 +39,7 @@ function isAuthorized(req) {
 
 // ---- Config push
 const PWA_URL   = process.env.PWA_URL || 'https://rampet.vercel.app';
-const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo.png`;   // <- CAMBIO: usar mi_logo.png
+const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo.png`;
 const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
 
 // Alias cómodos (si mandás { tipo: 'compra' } en vez de templateId)
@@ -53,17 +54,17 @@ const TEMPLATE_ALIASES = {
 function applyBlocksAndVars(text, data) {
   let out = text || '';
 
-  // Bloques condicionales (mismos que en email, los que te afectan al push)
+  // Bloques condicionales
   out = out.replace(/\[BLOQUE_VENCIMIENTO\]([\s\S]*?)\[\/BLOQUE_VENCIMIENTO\]/g,
-  (_, block) => (data?.vencimiento_text ? block : '')
-);
+    (_, block) => (data?.vencimiento_text ? block : '')
+  );
   out = out.replace(
     /\[BLOQUE_PUNTOS_BIENVENIDA\]([\s\S]*?)\[\/BLOQUE_PUNTOS_BIENVENIDA\]/g,
     (_, block) => (Number(data?.puntos_ganados) > 0 ? block : '')
   );
   out = out.replace(
     /\[BLOQUE_CREDENCIALES_PANEL\]([\s\S]*?)\[\/BLOQUE_CREDENCIALES_PANEL\]/g,
-    '' // normalmente esto no va en push
+    ''
   );
 
   // Reemplazo {clave}
@@ -71,7 +72,7 @@ function applyBlocksAndVars(text, data) {
     out = out.replace(new RegExp('\\{' + k + '\\}', 'g'), String(v ?? ''));
   }
 
-  // El cuerpo del push debe ser texto plano
+  // Cuerpo plano
   out = out.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   return out;
 }
@@ -102,12 +103,12 @@ export default async function handler(req, res) {
   try {
     let { title, body, data, tokens, clienteId, templateId, templateData, tipo } = req.body || {};
 
-    // Resolver alias de plantilla (si vino "tipo")
+    // Resolver alias
     if (!templateId && tipo && TEMPLATE_ALIASES[tipo]) {
       templateId = TEMPLATE_ALIASES[tipo];
     }
 
-    // 1) Tokens destino
+    // Tokens destino
     let tokenList = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
     let targetClientId = clienteId || null;
 
@@ -118,7 +119,7 @@ export default async function handler(req, res) {
     }
     if (!tokenList.length) return res.status(400).json({ message: 'No hay tokens para enviar.' });
 
-    // 2) Contenido (plantilla o texto directo)
+    // Contenido
     let notifTitle = title || 'Club RAMPET';
     let notifBody  = body  || 'Tienes novedades';
     let notifImage = null;
@@ -131,12 +132,11 @@ export default async function handler(req, res) {
         notifImage = tpl.image || null;
       }
     } else {
-      // Si mandaste title/body “crudos”, por las dudas aplicar reemplazos
       notifTitle = applyBlocksAndVars(notifTitle, templateData);
       notifBody  = applyBlocksAndVars(notifBody,  templateData);
     }
 
-    // 3) Mensaje webpush con icon/badge (logo)
+    // Mensaje webpush
     const webpushNotif = { title: notifTitle, body: notifBody, icon: ICON_URL, badge: BADGE_URL };
     if (notifImage) webpushNotif.image = notifImage;
 
@@ -149,10 +149,10 @@ export default async function handler(req, res) {
       },
     };
 
-    // 4) Enviar
+    // Enviar
     const resp = await messaging.sendEachForMulticast(msg);
 
-    // 5) Limpiar tokens inválidos
+    // Limpiar tokens inválidos
     const invalid = [];
     resp.responses.forEach((r, i) => {
       if (!r.success) {
