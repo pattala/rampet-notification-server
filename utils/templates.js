@@ -24,6 +24,8 @@ export function applyBlocksAndVars(str, data = {}) {
         return Number(data.puntos_ganados || 0) > 0 ? inner : "";
       case "BLOQUE_CREDENCIALES_PANEL":
         return (data.email || data.creado_desde_panel) ? inner : "";
+      case "BLOQUE_MENSAJE_PERSONAL":
+        return (data.mensaje_opcional && String(data.mensaje_opcional).trim()) ? inner : "";
       default:
         return inner;
     }
