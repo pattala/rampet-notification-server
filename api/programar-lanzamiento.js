@@ -1,93 +1,97 @@
-// /api/programar-lanzamiento.js (Node 18.x – Vercel)
-// Proxy server-to-server hacia tu scheduler externo, con CORS OK y secreto en el server.
+// ====================================================================
+// API: /api/programar-lanzamiento
+// Programa un envío de campaña en QStash
+// CORS robusto + Auth por Bearer o x-api-key
+// ====================================================================
 
-export const config = { runtime: 'nodejs18.x' };
+import { Client } from "@upstash/qstash";
 
-const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',')
+const qstashClient = new Client({ token: process.env.QSTASH_TOKEN || "" });
+
+// ---- CORS ----
+const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || "")
+  .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-const SCHEDULER_URL = process.env.NOTIF_SCHEDULER_URL
-  || 'https://rampet-notification-server.vercel.app/api/programar-lanzamiento';
-
-const API_SECRET = process.env.API_SECRET_KEY || process.env.MI_API_SECRET; // Secreto real (Bearer)
-const PUBLIC_PANEL_TOKEN = process.env.PUBLIC_PANEL_TOKEN || ''; // opcional: token no sensible que valida el front
-
-function originAllowed(origin) {
-  if (!origin) return false;
-  try {
-    const u = new URL(origin);
-    return ALLOWED.includes(u.origin);
-  } catch {
-    return ALLOWED.includes(origin);
+function applyCors(req, res) {
+  const origin = req.headers.origin || "";
+  if (ALLOWED.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
   }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,x-api-key");
+  if (req.method === "OPTIONS") {
+    // Preflight OK (sin body)
+    res.status(204).end();
+    return true;
+  }
+  return false;
 }
 
-function corsHeaders(origin) {
-  return {
-    'Access-Control-Allow-Origin': origin,
-    'Vary': 'Origin',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-API-Key',
-    'Access-Control-Max-Age': '86400',
-  };
+// ---- Auth ----
+function isAuthorized(req) {
+  const apiKey = req.headers["x-api-key"] || null;
+  if (apiKey && apiKey === process.env.API_SECRET_KEY) return true;
+
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (token && token === process.env.API_SECRET_KEY) return true;
+
+  // (Opcional) permitir si el origin está whitelisteado; comenta si no lo querés:
+  const origin = req.headers.origin || "";
+  if (ALLOWED.includes(origin)) return true;
+
+  return false;
 }
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin || '';
-  const isAllowed = originAllowed(origin);
-
-  // OPTIONS
-  if (req.method === 'OPTIONS') {
-    if (!isAllowed) return res.status(403).end();
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    Object.entries(corsHeaders(origin)).forEach(([k, v]) => res.setHeader(k, v));
-    return res.status(204).end();
+  if (applyCors(req, res)) return;
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Método no permitido" });
   }
-
-  if (!isAllowed) {
-    return res.status(403).json({ ok: false, error: 'Origin not allowed', origin });
-  }
-
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  Object.entries(corsHeaders(origin)).forEach(([k, v]) => res.setHeader(k, v));
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ ok: false, error: 'Method not allowed' });
+  if (!isAuthorized(req)) {
+    return res.status(401).json({ error: "No autorizado" });
   }
 
   try {
-    // Validación de token público (opcional, no sensible)
-    const clientToken = (req.headers['x-api-key'] || req.headers['authorization'] || '').toString().replace(/^Bearer\s+/i,'').trim();
-    if (PUBLIC_PANEL_TOKEN && clientToken !== PUBLIC_PANEL_TOKEN) {
-      return res.status(401).json({ ok: false, error: 'Unauthorized (public token mismatch)' });
+    const {
+      campaignId,
+      fechaNotificacion,   // ISO string
+      tipoNotificacion,    // 'lanzamiento' | 'recordatorio'
+      destinatarios,       // opcional
+      templateId,          // opcional (si querés validar/forwardear)
+      templateData         // opcional
+    } = req.body || {};
+
+    if (!campaignId || !fechaNotificacion || !tipoNotificacion) {
+      return res.status(400).json({
+        error: "Faltan datos requeridos: campaignId, fechaNotificacion, tipoNotificacion",
+      });
     }
 
-    const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
-    if (!body || typeof body !== 'object') {
-      return res.status(422).json({ ok: false, error: 'Body inválido' });
+    const when = Math.floor(new Date(fechaNotificacion).getTime() / 1000);
+    if (!Number.isFinite(when) || when <= 0) {
+      return res.status(422).json({ error: "fechaNotificacion inválida" });
     }
 
-    // Passthrough hacia el scheduler externo
-    const resp = await fetch(SCHEDULER_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Secreto del lado del server (NO del front)
-        'Authorization': `Bearer ${API_SECRET}`,
-      },
-      body: JSON.stringify(body),
+    // URL destino dentro del mismo proyecto (puede ser otra API tuya)
+    const destinationUrl = `https://${req.headers.host}/api/enviar-notificacion-campana`;
+
+    await qstashClient.publishJSON({
+      url: destinationUrl,
+      body: { campaignId, tipoNotificacion, destinatarios, templateId, templateData },
+      notBefore: when,
     });
 
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      return res.status(resp.status).json({ ok: false, schedulerStatus: resp.status, schedulerBody: data });
-    }
-
-    return res.status(200).json({ ok: true, result: data });
+    return res.status(202).json({
+      ok: true,
+      message: `Trabajo '${tipoNotificacion}' programado`,
+      when: fechaNotificacion,
+    });
   } catch (err) {
-    console.error('programar-lanzamiento error', err);
-    return res.status(500).json({ ok: false, error: 'Internal error', detail: String(err?.message || err) });
+    console.error("Error programando en QStash:", err);
+    return res.status(500).json({ error: "Error interno al programar la tarea" });
   }
 }
