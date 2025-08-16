@@ -4,12 +4,27 @@
 // ====================================================================
 
 import { Client } from "@upstash/qstash";
+// --- CORS (copiar al inicio del archivo) ---
+const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
+function cors(req, res) {
+  const origin = req.headers.origin || '';
+  if (ALLOWED.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).end(); return true; }
+  return false;
+}
 // Inicializamos el cliente de QStash con el token de publicación
 const qstashClient = new Client({ token: process.env.QSTASH_TOKEN });
 
 export default async function handler(req, res) {
   // Manejo de CORS y validación del método
+
+  if (cors(req, res)) return;
+  if (req.method !== 'POST') { res.status(405).json({message:'Método no permitido'}); return; }
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
