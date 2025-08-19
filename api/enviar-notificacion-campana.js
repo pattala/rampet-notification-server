@@ -1,150 +1,167 @@
 // ====================================================================
-// API: /api/enviar-notificacion-campana.js (VERSIÓN FINAL Y COMPLETA)
+// /api/enviar-notificacion-campana.js  (ESM, QStash + FCM WebPush + SendGrid)
 // ====================================================================
 
 import { verifySignature } from "@upstash/qstash/nextjs";
-const { initializeApp, cert } = require('firebase-admin/app');
-const { getFirestore } = require('firebase-admin/firestore');
-const sgMail = require('@sendgrid/mail');
-const { getMessaging } = require('firebase-admin/messaging');
+import { initializeApp, cert, getApps } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+import { getMessaging } from "firebase-admin/messaging";
+import sgMail from "@sendgrid/mail";
 
-// --- Inicialización de servicios ---
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+// --- Init SendGrid ---
+if (process.env.SENDGRID_API_KEY) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
 
-try {
-  const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
-  if (require('firebase-admin').apps.length === 0) {
-    initializeApp({ credential: cert(serviceAccount) });
-  }
-} catch (e) {
-  if (e.code !== 'app/duplicate-app') console.error('Firebase init error', e);
+// --- Init Firebase Admin (ESM) ---
+if (!getApps().length) {
+  const creds = process.env.GOOGLE_CREDENTIALS_JSON
+    ? JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON)
+    : null;
+  initializeApp(creds ? { credential: cert(creds) } : {});
 }
 
 const db = getFirestore();
 const messaging = getMessaging();
 
-// --- Función Principal ---
+// Config opcional para íconos de push web
+const PWA_URL   = process.env.PWA_URL || "https://rampet.vercel.app";
+const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo.png`;
+const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
+
+// --- Handler principal ---
 async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  if (req.method !== 'POST') return res.status(405).end();
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Método no permitido" });
 
   try {
-    const { campaignId, tipoNotificacion, destinatarios } = req.body;
+    const { campaignId, tipoNotificacion, destinatarios } =
+      typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}");
+
     if (!campaignId || !tipoNotificacion) {
       return res.status(400).json({ error: "Faltan campaignId o tipoNotificacion." });
     }
-    
-    await procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios });
-    res.status(200).json({ message: 'Notificación procesada.' });
 
-  } catch (error) {
-    console.error(`Error ejecutando envío para campaña:`, error);
-    res.status(500).json({ error: 'Fallo al procesar la notificación.', details: error.message });
+    await procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios });
+    return res.status(200).json({ ok: true, message: "Notificación procesada." });
+  } catch (err) {
+    console.error("Error enviando notificación de campaña:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
 
-// Envolvemos el handler con el verificador de QStash
 export default verifySignature(handler);
 
+// --------------------------------------------------------------------
+// Lógica de envío
+// --------------------------------------------------------------------
+async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios }) {
+  // 1) Campaña
+  const snap = await db.collection("campanas").doc(String(campaignId)).get();
+  if (!snap.exists) throw new Error(`Campaña ${campaignId} no encontrada`);
+  const campana = snap.data();
 
-// --- Función de Ayuda ---
-async function procesarNotificacionIndividual(trabajo) {
-    const { campaignId, tipoNotificacion, destinatarios } = trabajo;
+  if (campana.estaActiva === false) {
+    console.log(`Campaña ${campaignId} deshabilitada. No se envía.`);
+    return;
+  }
 
-    const campanaDoc = await db.collection('campanas').doc(campaignId).get();
-    if (!campanaDoc.exists) throw new Error(`Campaña con ID ${campaignId} no encontrada.`);
-    const campanaData = campanaDoc.data();
-    
-    if (!campanaData.estaActiva) {
-        console.log(`Campaña ${campaignId} está deshabilitada. Envío cancelado.`);
-        return;
+  // 2) Plantilla
+  const tplId = tipoNotificacion === "lanzamiento" ? "nueva_campana" : "recordatorio_campana";
+  const tplSnap = await db.collection("plantillas_mensajes").doc(tplId).get();
+  if (!tplSnap.exists) throw new Error(`Plantilla ${tplId} no encontrada`);
+  const plantilla = tplSnap.data();
+
+  // 3) Destinatarios (todos o grupo de prueba)
+  let clientes = [];
+  if (Array.isArray(destinatarios) && destinatarios.length) {
+    const all = await db.collection("clientes").where("numeroSocio", "!=", null).get();
+    const arr = all.docs.map(d => ({ id: d.id, ...d.data() }));
+    clientes = arr.filter(c =>
+      destinatarios.includes(String(c.numeroSocio)) || destinatarios.includes(c.email)
+    );
+  } else {
+    const all = await db.collection("clientes").where("numeroSocio", "!=", null).get();
+    clientes = all.docs.map(d => ({ id: d.id, ...d.data() }));
+  }
+
+  // Filtrar suscritos a algo (email o push)
+  const suscritos = clientes.filter(c => Boolean(c.email) || (Array.isArray(c.fcmTokens) && c.fcmTokens.length));
+  if (!suscritos.length) {
+    console.log("Sin destinatarios suscritos.");
+    return;
+  }
+
+  // 4) Preparar textos (comunes)
+  const textoVigencia =
+    campana.fechaFin && campana.fechaFin !== "2100-01-01"
+      ? `Aprovechá antes del ${new Date(campana.fechaFin).toLocaleDateString("es-AR")}.`
+      : "¡Aprovechá los beneficios!";
+
+  const subject = String(plantilla.titulo || "")
+    .replace(/{nombre_campana}/g, campana.nombre);
+
+  const cuerpoBase = String(plantilla.cuerpo || "")
+    .replace(/{nombre_campana}/g, campana.nombre)
+    .replace(/{cuerpo_campana}/g, campana.cuerpo || "")
+    .replace(/{fecha_inicio}/g, new Date(campana.fechaInicio).toLocaleDateString("es-AR"))
+    .replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
+
+  // 5) PUSH (WebPush con notification payload: visible con PWA cerrada)
+  const tokens = [...new Set(suscritos.flatMap(c => c.fcmTokens || []))];
+  if (tokens.length) {
+    // limpiar HTML para el cuerpo de push
+    const bodyPush = cuerpoBase.replace(/<[^>]*>?/gm, " ").replace(/{nombre}/g, "cliente").trim();
+    const msg = {
+      tokens,
+      data: {}, // si querés deep link, agregá claves como { screen: 'campanas' }
+      webpush: {
+        notification: {
+          title: subject,
+          body: bodyPush,
+          icon: ICON_URL,
+          badge: BADGE_URL
+        },
+        fcmOptions: { link: PWA_URL }
+      }
+    };
+
+    const resp = await messaging.sendEachForMulticast(msg);
+    console.log(`Push enviados: OK=${resp.successCount} ERR=${resp.failureCount}`);
+
+    // Limpieza opcional de tokens inválidos (si querés por cliente, hay que mapear)
+    // Aquí omitimos para simplificar; si querés lo agrego luego.
+  }
+
+  // 6) EMAILS (SendGrid)
+  const emails = [...new Set(suscritos.map(c => c.email).filter(Boolean))];
+  if (emails.length && process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL) {
+    const jobs = emails.map(async (email) => {
+      const cliente = suscritos.find(c => c.email === email);
+      const nombre = cliente?.nombre?.split(" ")[0] || "Cliente";
+
+      const html = `
+        <div style="font-family:Arial, sans-serif; line-height:1.6; color:#333; max-width:600px; margin:auto; border:1px solid #ddd; padding:20px;">
+          <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo" style="width:150px; display:block; margin:0 auto 20px auto;">
+          <h2 style="color:#0056b3;">${subject}</h2>
+          <div>${cuerpoBase.replace(/{nombre}/g, nombre)}</div>
+          <br><p>Atentamente,<br><strong>Club RAMPET</strong></p>
+        </div>`.trim();
+
+      await sgMail.send({
+        to: email,
+        from: { email: process.env.SENDGRID_FROM_EMAIL, name: "Club RAMPET" },
+        subject,
+        html
+      });
+    });
+
+    await Promise.allSettled(jobs);
+    console.log(`Emails procesados: ${emails.length}`);
+  } else {
+    if (!process.env.SENDGRID_API_KEY || !process.env.SENDGRID_FROM_EMAIL) {
+      console.log("SendGrid no configurado; se omiten emails.");
     }
-
-    const templateId = tipoNotificacion === 'lanzamiento' ? 'nueva_campana' : 'recordatorio_campana';
-    const templateDoc = await db.collection('plantillas_mensajes').doc(templateId).get();
-    if (!templateDoc.exists) throw new Error(`Plantilla ${templateId} no encontrada.`);
-    const plantilla = templateDoc.data();
-
-    let clientesFinales = [];
-    if (destinatarios && destinatarios.length > 0) {
-        console.log(`Enviando a grupo de prueba: ${destinatarios.join(', ')}`);
-        const todosLosClientesSnapshot = await db.collection('clientes').where('numeroSocio', '!=', null).get();
-        const todosLosClientes = todosLosClientesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        clientesFinales = todosLosClientes.filter(c => 
-            destinatarios.includes(c.numeroSocio?.toString()) || destinatarios.includes(c.email)
-        );
-    } else {
-        console.log("Enviando a todos los clientes suscritos.");
-        const clientesSnapshot = await db.collection('clientes').where('numeroSocio', '!=', null).get();
-        clientesFinales = clientesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    }
-
-    const clientesSuscritos = clientesFinales.filter(c => c.email || (c.fcmTokens && c.fcmTokens.length > 0));
-    if (clientesSuscritos.length === 0) {
-        console.log(`No se encontraron clientes suscritos para esta campaña.`);
-        return;
-    }
-
-    const todosLosTokens = [...new Set(clientesSuscritos.flatMap(c => c.fcmTokens || []))];
-    const todosLosEmails = [...new Set(clientesSuscritos.map(c => c.email).filter(Boolean))];
-
-    // --- LÓGICA DE TEXTO DE VIGENCIA (Reutilizable para Push y Email) ---
-    let textoVigencia = '';
-    if (campanaData.fechaFin && campanaData.fechaFin !== '2100-01-01') {
-        textoVigencia = `Aprovecha los beneficios antes de que termine el ${new Date(campanaData.fechaFin).toLocaleDateString('es-ES')}.`;
-    } else {
-        textoVigencia = '¡Aprovecha los beneficios!';
-    }
-
-
-    // --- Envío Push masivo ---
-    if (todosLosTokens.length > 0) {
-        let title = plantilla.titulo.replace(/{nombre_campana}/g, campanaData.nombre);
-        
-        let bodyPush = plantilla.cuerpo
-            .replace(/{nombre_campana}/g, campanaData.nombre)
-            .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
-            .replace(/{fecha_inicio}/g, new Date(campanaData.fechaInicio).toLocaleDateString('es-ES'))
-            .replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
-        
-        const cleanBody = bodyPush.replace(/<[^>]*>?/gm, ' ').replace(/{nombre}/g, 'tú'); // Limpiar HTML y usar pronombre genérico
-        
-        await messaging.sendEachForMulticast({
-            data: { title, body: cleanBody },
-            tokens: todosLosTokens,
-        });
-        console.log(`Push enviado para campaña ${campaignId} a ${todosLosTokens.length} tokens.`);
-    }
-
-    // --- Envío de Emails ---
-    for (const email of todosLosEmails) {
-        const cliente = clientesSuscritos.find(c => c.email === email);
-        const nombreCliente = cliente ? cliente.nombre.split(' ')[0] : 'Cliente';
-        
-        let subject = plantilla.titulo.replace(/{nombre_campana}/g, campanaData.nombre);
-        
-        let bodyEmail = plantilla.cuerpo
-            .replace(/{nombre}/g, nombreCliente)
-            .replace(/{nombre_campana}/g, campanaData.nombre)
-            .replace(/{cuerpo_campana}/g, campanaData.cuerpo || '')
-            .replace(/{fecha_inicio}/g, new Date(campanaData.fechaInicio).toLocaleDateString('es-ES'))
-            .replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
-      
-        const htmlBody = `
-            <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px;">
-                <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo RAMPET" style="width: 150px; display: block; margin: 0 auto 20px auto;">
-                <h2 style="color: #0056b3;">${subject}</h2>
-                <div>${bodyEmail.replace(/\n/g, '<br>')}</div>
-                <br>
-                <p>Atentamente,<br><strong>El equipo de Club RAMPET</strong></p>
-            </div>`;
-        
-        await sgMail.send({
-            to: email,
-            from: { email: process.env.SENDGRID_FROM_EMAIL, name: 'Club RAMPET' },
-            subject: subject,
-            html: htmlBody,
-        });
-    }
-     console.log(`Emails enviados para campaña ${campaignId} a ${todosLosEmails.length} clientes.`);
+  }
 }
