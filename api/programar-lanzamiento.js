@@ -69,13 +69,19 @@ const API_SECRET_RAW    = process.env.API_SECRET_KEY || process.env.MI_API_SECRE
 const API_SECRET        = API_SECRET_RAW.trim();
 
 /* URL absoluta al sender */
+// URL absoluta al sender SIEMPRE en PRODUCCIÓN (evita previews protegidos por password)
 function buildSendUrl() {
-  // Si existe VERCEL_URL usamos ese host; si no, el dominio principal
-  const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null;
-  const fallback  = "https://rampet-notification-server-three.vercel.app";
-  const base      = vercelUrl || fallback;
-  return `${base}/api/send-notification`;
+  try {
+    const sched = (process.env.NOTIF_SCHEDULER_URL || "").trim();
+    if (sched) {
+      const base = new URL(sched).origin; // p.ej. https://rampet-notification-server-three.vercel.app
+      return `${base}/api/send-notification`;
+    }
+  } catch {}
+  // Fallback explícito al dominio prod
+  return "https://rampet-notification-server-three.vercel.app/api/send-notification";
 }
+
 
 /* Construye título/cuerpo desde templateData y, si existe, plantilla Firestore */
 async function buildMessage({ templateId, templateData }) {
