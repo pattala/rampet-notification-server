@@ -1,23 +1,25 @@
-// /api/programar-notificacion.js (Vercel Node 'nodejs' ESM)
+// /api/programar-notificacion.js (Vercel runtime "nodejs" – ESM)
+
 export const config = { runtime: 'nodejs' };
 
-// CORS allowlist (en Vercel: CORS_ALLOWED_ORIGINS="http://127.0.0.1:5500,http://localhost:5500,https://rampet.vercel.app")
 const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-// Scheduler externo
-const SCHEDULER_URL = process.env.NOTIF_SCHEDULER_URL
-  || 'https://rampet-notification-server-three.vercel.app/api/programar-notificacion';
+const INTERNAL_TOKEN = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || '';
 
-// Secreto server-side
-const API_SECRET = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || '';
-// Token público opcional para validar el panel sin exponer secretos
-const PUBLIC_PANEL_TOKEN = process.env.PUBLIC_PANEL_TOKEN || '';
+const SCHEDULER_URL =
+  process.env.NOTIF_SCHEDULER_URL
+  || `https://${process.env.VERCEL_URL || 'rampet-notification-server-three.vercel.app'}/api/send-notification`;
 
 function originAllowed(origin) {
   if (!origin) return false;
   try { return ALLOWED.includes(new URL(origin).origin); }
   catch { return ALLOWED.includes(origin); }
+}
+function isInternal(req) {
+  const raw = (req.headers['authorization'] || req.headers['x-api-key'] || '')
+    .toString().replace(/^Bearer\s+/i,'').trim();
+  return !!raw && raw === INTERNAL_TOKEN;
 }
 function corsHeaders(origin) {
   return {
@@ -30,48 +32,41 @@ function corsHeaders(origin) {
 }
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin || '';
-  const isAllowed = originAllowed(origin);
+  const origin  = req.headers.origin || '';
+  const allowed = originAllowed(origin) || isInternal(req);
 
   if (req.method === 'OPTIONS') {
-    if (!isAllowed) return res.status(403).end();
+    if (!allowed) return res.status(403).end();
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    Object.entries(corsHeaders(origin)).forEach(([k,v])=>res.setHeader(k,v));
+    Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k,v]) => res.setHeader(k,v));
     return res.status(204).end();
   }
-  if (!isAllowed) return res.status(403).json({ ok:false, error:'Origin not allowed', origin });
 
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  Object.entries(corsHeaders(origin)).forEach(([k,v])=>res.setHeader(k,v));
-
+  if (!allowed) return res.status(403).json({ ok:false, error:'Origin not allowed', origin });
   if (req.method !== 'POST') return res.status(405).json({ ok:false, error:'Method not allowed' });
 
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k,v]) => res.setHeader(k,v));
+
   try {
-    const clientToken = (req.headers['x-api-key'] || req.headers['authorization'] || '')
-      .toString().replace(/^Bearer\s+/i,'').trim();
+    const payload = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
 
-    if (PUBLIC_PANEL_TOKEN && clientToken !== PUBLIC_PANEL_TOKEN) {
-      return res.status(401).json({ ok:false, error:'Unauthorized (public token mismatch)' });
-    }
-
-    const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
-
-    const resp = await fetch(SCHEDULER_URL, {
+    const r = await fetch(SCHEDULER_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${API_SECRET}`, // secreto solo del lado server
+        'Authorization': `Bearer ${INTERNAL_TOKEN}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
 
-    const data = await resp.json().catch(()=>({}));
-    if (!resp.ok) {
-      return res.status(resp.status).json({ ok:false, schedulerStatus: resp.status, schedulerBody: data });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(r.status).json({ ok:false, schedulerStatus:r.status, schedulerBody:data });
     }
-    return res.status(200).json({ ok:true, result: data });
+    return res.status(200).json({ ok:true, result:data });
   } catch (err) {
-    console.error('programar-notificacion error', err);
-    return res.status(500).json({ ok:false, error:'Internal error', detail: String(err?.message||err) });
+    console.error('programar-notificacion error:', err);
+    return res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 }
