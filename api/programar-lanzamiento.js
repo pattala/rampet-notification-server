@@ -104,22 +104,29 @@ async function buildMessage({ templateId, templateData }) {
 }
 
 // Obtiene clienteIds para envío (si el panel no los manda)
+// Incluye clientes con EMAIL válido o con FCM tokens.
+// Así, si no hay tokens, igual se envían los emails.
 async function collectClienteIdsIfMissing() {
   if (!db) return [];
   const ids = [];
+  const isLikelyEmail = (s) =>
+    typeof s === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
+
   try {
-    // Estrategia simple y robusta: leer todos y filtrar por fcmTokens con algo dentro
     const snap = await db.collection(CLIENTS_COLLECTION).get();
     snap.forEach(doc => {
       const data = doc.data() || {};
-      const arr  = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
-      if (arr.length > 0) ids.push(doc.id);
+      const tokens = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
+      const hasTokens = tokens.length > 0;
+      const hasEmail  = isLikelyEmail(data.email);
+      if (hasTokens || hasEmail) ids.push(doc.id);
     });
   } catch (e) {
-    console.error("[programar-lanzamiento] collectClienteIds error:", e?.message || e);
+    console.error("[programar-lanzamiento] collectClienteIdsIfMissing error:", e?.message || e);
   }
   return ids;
 }
+
 
 // ────────────── Handler ──────────────
 export default async function handler(req, res) {
