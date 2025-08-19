@@ -3,18 +3,15 @@ export const config = { runtime: "nodejs" };
 
 import admin from "firebase-admin";
 
-// ───────────────────── CORS (única fuente) ─────────────────────
+/* ───────────────────── CORS (única fuente) ───────────────────── */
 function parseAllowedOrigins() {
   const raw = (process.env.CORS_ALLOWED_ORIGINS || "").trim();
   return raw ? raw.split(",").map(s => s.trim()).filter(Boolean) : [];
 }
-
 function originAllowed(origin) {
   if (!origin) return false;
-  const allowed = parseAllowedOrigins();
-  return allowed.includes(origin);
+  return parseAllowedOrigins().includes(origin);
 }
-
 function setCors(res, origin) {
   if (originAllowed(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
@@ -23,12 +20,12 @@ function setCors(res, origin) {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With, X-API-Key"
+    "Content-Type, Authorization, X-Requested-With, X-API-Key, x-api-key"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// ───────────────────── Utilidades JSON ─────────────────────
+/* ───────────────────── Utilidades JSON ───────────────────── */
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (typeof req.body === "string") {
@@ -40,7 +37,7 @@ async function readJson(req) {
   return txt ? JSON.parse(txt) : {};
 }
 
-// ───────────────────── Firebase init (Firestore) ─────────────────────
+/* ───────────────────── Firebase init (Firestore) ───────────────────── */
 let db = null;
 try {
   const hasCred = !!process.env.GOOGLE_CREDENTIALS_JSON;
@@ -65,20 +62,22 @@ try {
   console.error("[programar-lanzamiento] Firebase init error:", e);
 }
 
-// ───────────────────── Constantes ─────────────────────
+/* ───────────────────── Constantes ───────────────────── */
 const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
 const FCM_TOKENS_FIELD  = "fcmTokens";
-const API_SECRET        = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "";
+const API_SECRET_RAW    = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "";
+const API_SECRET        = API_SECRET_RAW.trim();
 
-// URL absoluta al sender (misma app en Vercel, con fallback a tu dominio)
+/* URL absoluta al sender */
 function buildSendUrl() {
+  // Si existe VERCEL_URL usamos ese host; si no, el dominio principal
   const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null;
   const fallback  = "https://rampet-notification-server-three.vercel.app";
   const base      = vercelUrl || fallback;
   return `${base}/api/send-notification`;
 }
 
-// Construye título/cuerpo desde templateData y, si existe, plantilla Firestore
+/* Construye título/cuerpo desde templateData y, si existe, plantilla Firestore */
 async function buildMessage({ templateId, templateData }) {
   let title = templateData?.titulo || "RAMPET";
   let body  = templateData?.descripcion || "";
@@ -103,8 +102,8 @@ async function buildMessage({ templateId, templateData }) {
   return { title, body };
 }
 
-// Obtiene clienteIds por defecto si el panel no manda destinatarios
-// ⚠️ Incluye clientes con EMAIL válido o con FCM tokens (emails no dependen de tokens)
+/* Obtiene clienteIds por defecto si el panel no manda destinatarios
+   ⚠️ Incluye clientes con EMAIL válido o con FCM tokens (emails no dependen de tokens) */
 async function collectClienteIdsIfMissing() {
   if (!db) return [];
   const ids = [];
@@ -126,7 +125,7 @@ async function collectClienteIdsIfMissing() {
   return ids;
 }
 
-// Recolecta destinatarios por defecto desde Firestore (tokens + emails + ids)
+/* Recolecta destinatarios por defecto desde Firestore (tokens + emails + ids) */
 async function collectRecipientsDefault() {
   const result = { tokens: [], emails: [], clienteIds: [] };
   if (!db) return result;
@@ -143,14 +142,11 @@ async function collectRecipientsDefault() {
     snap.forEach(doc => {
       const data = doc.data() || {};
 
-      // id del cliente
       ids.push(doc.id);
 
-      // Tokens
       const arr = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
       arr.forEach(t => { if (typeof t === "string" && t.trim()) tokenSet.add(t.trim()); });
 
-      // Email
       if (isLikelyEmail(data.email)) emailSet.add(String(data.email).trim());
     });
   } catch (e) {
@@ -163,7 +159,7 @@ async function collectRecipientsDefault() {
   return result;
 }
 
-// ───────────────────── Handler ─────────────────────
+/* ───────────────────── Handler ───────────────────── */
 export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   setCors(res, origin);
@@ -173,11 +169,9 @@ export default async function handler(req, res) {
     if (!originAllowed(origin)) return res.status(403).end();
     return res.status(204).end();
   }
-
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
-
   if (!originAllowed(origin)) {
     return res.status(403).json({ ok: false, error: "Origin not allowed" });
   }
@@ -185,35 +179,31 @@ export default async function handler(req, res) {
   try {
     const payload = await readJson(req);
 
-    // Lo que manda el panel hoy (según tu captura):
-    // { campaignId, tipoNotificacion, templateId, templateData, fechaNotificacion }
+    // Lo que manda el panel:
+    // { campaignId, tipoNotificacion, templateId, templateData, fechaNotificacion, ... }
     const {
       campaignId,
       tipoNotificacion,     // "lanzamiento" => enviar ahora
       templateId,
       templateData = {},
-      fechaNotificacion,    // no se usa si es inmediata
-      tokens,               // opcional: si el panel los manda
-      clienteIds,           // opcional: si el panel los manda
-      emails,               // opcional: si el panel los manda
-      data                  // opcional: data extra
+      fechaNotificacion,    // ignorada si es inmediato
+      tokens,               // opcional
+      clienteIds,           // opcional
+      emails,               // opcional
+      data                  // opcional
     } = payload || {};
 
     // 1) Armar mensaje
     const { title, body } = await buildMessage({ templateId, templateData });
 
-    // 2) Resolver destinatarios (con fallbacks)
+    // 2) Resolver destinatarios con fallbacks
     let clienteIdsToUse = Array.isArray(clienteIds) ? clienteIds.filter(Boolean) : [];
     let tokensToUse     = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
     let emailsToUse     = Array.isArray(emails) ? emails.filter(Boolean) : [];
 
-    // 1er fallback: si no vinieron tokens ni clienteIds, armamos clienteIds por defecto
     if (tokensToUse.length === 0 && clienteIdsToUse.length === 0) {
       clienteIdsToUse = await collectClienteIdsIfMissing();
     }
-
-    // 2do fallback (último recurso): si sigue TODO vacío (tokens, ids y emails),
-    // juntamos DIRECTAMENTE tokens + emails + ids desde Firestore.
     if (tokensToUse.length === 0 && clienteIdsToUse.length === 0 && emailsToUse.length === 0) {
       const rec = await collectRecipientsDefault();
       tokensToUse     = rec.tokens;
@@ -239,13 +229,13 @@ export default async function handler(req, res) {
     // 4) Reenvío server-to-server al sender con auth
     if (!API_SECRET) {
       console.error("[programar-lanzamiento] Missing API_SECRET_KEY env");
-      return res.status(500).json({
-        ok: false,
-        error: "Missing API_SECRET_KEY on server",
-      });
+      return res.status(500).json({ ok: false, error: "Missing API_SECRET_KEY on server" });
     }
 
     const url = buildSendUrl();
+    // Log mínimo para diagnosticar (sin exponer secretos)
+    console.log("[programar-lanzamiento][auth] secret_present:", !!API_SECRET, "len:", API_SECRET.length, "url:", url);
+
     const r = await fetch(url, {
       method: "POST",
       headers: {
@@ -257,13 +247,16 @@ export default async function handler(req, res) {
       body: JSON.stringify(senderPayload),
     });
 
-    const json = await r.json().catch(() => ({}));
+    const txt = await r.text();
+    let json;
+    try { json = JSON.parse(txt); } catch { json = { raw: txt }; }
+
     return res.status(200).json({
       ok: true,
       result: {
         ok: r.ok,
         schedulerStatus: r.status,
-        ...json, // incluye successCount/failureCount/invalidTokens/cleanedDocs/emails
+        ...json, // incluye successCount/failureCount/invalidTokens/cleanedDocs/emails si el sender responde eso
       },
     });
   } catch (e) {
