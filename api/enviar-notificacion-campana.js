@@ -32,18 +32,21 @@ const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
 // --- Handler principal ---
 async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Método no permitido" });
 
   try {
-    const { campaignId, tipoNotificacion, destinatarios } =
-      typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}");
+    const { campaignId, tipoNotificacion, destinatarios, templateId } =
+      (typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}")) || {};
 
     if (!campaignId || !tipoNotificacion) {
       return res.status(400).json({ error: "Faltan campaignId o tipoNotificacion." });
     }
 
-    await procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios });
+    await procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios, templateId });
     return res.status(200).json({ ok: true, message: "Notificación procesada." });
   } catch (err) {
     console.error("Error enviando notificación de campaña:", err);
@@ -56,7 +59,7 @@ export default verifySignature(handler);
 // --------------------------------------------------------------------
 // Lógica de envío
 // --------------------------------------------------------------------
-async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios }) {
+async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios, templateId }) {
   // 1) Campaña
   const snap = await db.collection("campanas").doc(String(campaignId)).get();
   if (!snap.exists) throw new Error(`Campaña ${campaignId} no encontrada`);
@@ -67,23 +70,23 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
     return;
   }
 
-  // 2) Plantilla
-  const tplId = tipoNotificacion === "lanzamiento" ? "nueva_campana" : "recordatorio_campana";
-  const tplSnap = await db.collection("plantillas_mensajes").doc(tplId).get();
+  // 2) Plantilla  (colección correcta = "plantillas")
+  const tplId = templateId || (tipoNotificacion === "lanzamiento" ? "campaña_nueva_push" : "recordatorio_campana");
+  const tplSnap = await db.collection("plantillas").doc(tplId).get();
   if (!tplSnap.exists) throw new Error(`Plantilla ${tplId} no encontrada`);
   const plantilla = tplSnap.data();
 
   // 3) Destinatarios (todos o grupo de prueba)
   let clientes = [];
+  const all = await db.collection("clientes").where("numeroSocio", "!=", null).get();
+  const arr = all.docs.map(d => ({ id: d.id, ...d.data() }));
+
   if (Array.isArray(destinatarios) && destinatarios.length) {
-    const all = await db.collection("clientes").where("numeroSocio", "!=", null).get();
-    const arr = all.docs.map(d => ({ id: d.id, ...d.data() }));
     clientes = arr.filter(c =>
       destinatarios.includes(String(c.numeroSocio)) || destinatarios.includes(c.email)
     );
   } else {
-    const all = await db.collection("clientes").where("numeroSocio", "!=", null).get();
-    clientes = all.docs.map(d => ({ id: d.id, ...d.data() }));
+    clientes = arr;
   }
 
   // Filtrar suscritos a algo (email o push)
@@ -111,7 +114,6 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
   // 5) PUSH (WebPush con notification payload: visible con PWA cerrada)
   const tokens = [...new Set(suscritos.flatMap(c => c.fcmTokens || []))];
   if (tokens.length) {
-    // limpiar HTML para el cuerpo de push
     const bodyPush = cuerpoBase.replace(/<[^>]*>?/gm, " ").replace(/{nombre}/g, "cliente").trim();
     const msg = {
       tokens,
@@ -129,9 +131,9 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
 
     const resp = await messaging.sendEachForMulticast(msg);
     console.log(`Push enviados: OK=${resp.successCount} ERR=${resp.failureCount}`);
-
-    // Limpieza opcional de tokens inválidos (si querés por cliente, hay que mapear)
-    // Aquí omitimos para simplificar; si querés lo agrego luego.
+    if (resp.failureCount) {
+      console.log('Errores ejemplo:', resp.responses.filter(r => !r.success).slice(0,3));
+    }
   }
 
   // 6) EMAILS (SendGrid)
@@ -149,12 +151,16 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
           <br><p>Atentamente,<br><strong>Club RAMPET</strong></p>
         </div>`.trim();
 
-      await sgMail.send({
-        to: email,
-        from: { email: process.env.SENDGRID_FROM_EMAIL, name: "Club RAMPET" },
-        subject,
-        html
-      });
+      try {
+        await sgMail.send({
+          to: email,
+          from: { email: process.env.SENDGRID_FROM_EMAIL, name: "Club RAMPET" },
+          subject,
+          html
+        });
+      } catch (e) {
+        console.error('SendGrid error ->', email, e?.response?.body || e);
+      }
     });
 
     await Promise.allSettled(jobs);
