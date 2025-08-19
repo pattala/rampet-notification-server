@@ -6,35 +6,29 @@ import admin from "firebase-admin";
 
 let messaging;
 let firebaseInitError = null;
+let firebaseApp = null;
+let db = null;
 
 try {
-  let app;
-
-  // Log mínimo (sin secretos)
   const hasCred = !!process.env.GOOGLE_CREDENTIALS_JSON;
   console.log("[send-notification] GOOGLE_CREDENTIALS_JSON present:", hasCred);
 
   let credJson = null;
   if (hasCred) {
-    try {
-      credJson = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
-    } catch (e) {
-      console.error("[send-notification] GOOGLE_CREDENTIALS_JSON JSON.parse failed:", e?.message);
-      // Seguimos con credJson = null para intentar Application Default
-    }
+    try { credJson = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON); }
+    catch (e) { console.error("[send-notification] GOOGLE_CREDENTIALS_JSON JSON.parse failed:", e?.message); }
   }
 
   if (!admin.apps.length) {
-    app = admin.initializeApp({
-      credential: credJson
-        ? admin.credential.cert(credJson)
-        : admin.credential.applicationDefault(),
+    firebaseApp = admin.initializeApp({
+      credential: credJson ? admin.credential.cert(credJson) : admin.credential.applicationDefault(),
     });
   } else {
-    app = admin.app();
+    firebaseApp = admin.app();
   }
 
-  messaging = admin.messaging(app);
+  messaging = admin.messaging(firebaseApp);
+  db = admin.firestore(firebaseApp);
 } catch (e) {
   firebaseInitError = e;
   console.error("[send-notification] Firebase init error:", e);
@@ -52,6 +46,11 @@ function isAuthorized(req) {
 
   return !!INTERNAL_TOKEN && raw === INTERNAL_TOKEN;
 }
+
+// ───────────────── Config de datos ─────────────────
+// Si tu colección NO se llama 'clientes', cambiala acá:
+const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
+const FCM_TOKENS_FIELD = "fcmTokens";
 
 // ───────────────── Utilidades ─────────────────
 function pick(v, fallback) {
@@ -103,6 +102,34 @@ function chunk(arr, size) {
   return res;
 }
 
+// Limpieza automática de tokens inválidos en Firestore
+async function cleanupInvalidTokens(invalidTokens = []) {
+  if (!db || invalidTokens.length === 0) return { cleanedDocs: 0 };
+
+  let cleanedDocs = 0;
+  for (const token of invalidTokens) {
+    try {
+      const snap = await db
+        .collection(CLIENTS_COLLECTION)
+        .where(FCM_TOKENS_FIELD, "array-contains", token)
+        .get();
+
+      if (snap.empty) continue;
+
+      const batch = db.batch();
+      snap.forEach(doc => {
+        batch.update(doc.ref, { [FCM_TOKENS_FIELD]: admin.firestore.FieldValue.arrayRemove(token) });
+      });
+      await batch.commit();
+      cleanedDocs += snap.size;
+      console.log(`[send-notification] Cleaned token ${token} from ${snap.size} doc(s).`);
+    } catch (e) {
+      console.error("[send-notification] cleanupInvalidTokens error:", e?.message || e);
+    }
+  }
+  return { cleanedDocs };
+}
+
 // ───────────────── Handler ─────────────────
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -119,7 +146,7 @@ export default async function handler(req, res) {
     return res.status(500).json({
       ok: false,
       error: "Firebase init failed",
-      hint: "Revisá GOOGLE_CREDENTIALS_JSON en Vercel. Debe ser el JSON completo del Service Account.",
+      hint: "Revisá GOOGLE_CREDENTIALS_JSON en Vercel.",
       detail: String(firebaseInitError?.message || firebaseInitError || "Unknown"),
     });
   }
@@ -128,16 +155,7 @@ export default async function handler(req, res) {
     const body = await readJson(req);
 
     // Estructura esperada:
-    // {
-    //   tokens?: string[],    // preferido
-    //   topic?: string,       // opcional
-    //   title?: string,
-    //   body?: string,
-    //   icon?: string,
-    //   badge?: string,
-    //   link?: string,
-    //   data?: Record<string,string|number|...>
-    // }
+    // { tokens?: string[], topic?: string, title?: string, body?: string, icon?, badge?, link?, data?: {} }
     const {
       tokens = [],
       topic,
@@ -154,13 +172,9 @@ export default async function handler(req, res) {
 
     // Envío por topic
     if (topic && (!tokens || tokens.length === 0)) {
-      const msg = {
-        topic,
-        webpush,
-        ...(Object.keys(safeData).length ? { data: safeData } : {}),
-      };
+      const msg = { topic, webpush, ...(Object.keys(safeData).length ? { data: safeData } : {}) };
       const messageId = await messaging.send(msg, false);
-      return res.status(200).json({ ok: true, mode: "topic", messageId });
+      return res.status(200).json({ ok: true, mode: "topic", messageId, cleanedDocs: 0, invalidTokens: [] });
     }
 
     // Envío por tokens
@@ -174,11 +188,7 @@ export default async function handler(req, res) {
     const invalidTokens = [];
 
     for (const tk of batches) {
-      const msg = {
-        tokens: tk,
-        webpush,
-        ...(Object.keys(safeData).length ? { data: safeData } : {}),
-      };
+      const msg = { tokens: tk, webpush, ...(Object.keys(safeData).length ? { data: safeData } : {}) };
       const r = await messaging.sendEachForMulticast(msg);
 
       success += r.successCount;
@@ -197,12 +207,16 @@ export default async function handler(req, res) {
       });
     }
 
+    // Limpieza automática
+    const { cleanedDocs } = await cleanupInvalidTokens(invalidTokens);
+
     return res.status(200).json({
       ok: true,
       mode: "multicast",
       successCount: success,
       failureCount: failure,
       invalidTokens,
+      cleanedDocs, // ← cuantos documentos fueron actualizados
     });
   } catch (err) {
     console.error("send-notification error:", err);
