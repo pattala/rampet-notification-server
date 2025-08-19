@@ -1,97 +1,210 @@
-// /api/programar-lanzamiento.js (Vercel runtime "nodejs" – ESM)
+// /api/programar-lanzamiento.js  (Vercel runtime "nodejs" – ESM)
+export const config = { runtime: "nodejs" };
 
-// 👉 Vercel sólo acepta: 'nodejs' | 'edge'
-export const config = { runtime: 'nodejs' };
+import admin from "firebase-admin";
 
-// ----- C O N F I G -----
-const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// ────────────── CORS helpers (1 sola fuente en este archivo) ──────────────
+function parseAllowedOrigins() {
+  const raw = (process.env.CORS_ALLOWED_ORIGINS || "").trim();
+  return raw ? raw.split(",").map(s => s.trim()).filter(Boolean) : [];
+}
 
-// Secreto interno para llamadas server-to-server (panel NO lo usa)
-const INTERNAL_TOKEN = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || '';
-
-// Worker real que ejecuta el envío (NUNCA apuntar a este mismo endpoint)
-const SCHEDULER_URL = (
-  process.env.NOTIF_SCHEDULER_URL
-  || `https://${process.env.VERCEL_URL || 'rampet-notification-server-three.vercel.app'}/api/send-notification`
-);
-
-// ----- H E L P E R S  C O R S -----
 function originAllowed(origin) {
   if (!origin) return false;
-  try {
-    return ALLOWED.includes(new URL(origin).origin);
-  } catch {
-    return ALLOWED.includes(origin);
+  const allowed = parseAllowedOrigins();
+  return allowed.includes(origin);
+}
+
+function setCors(res, origin) {
+  if (originAllowed(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
   }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-function corsHeaders(origin) {
-  return {
-    'Access-Control-Allow-Origin': origin,
-    'Vary': 'Origin',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-API-Key',
-    'Access-Control-Max-Age': '86400',
-  };
+// ────────────── JSON utils ──────────────
+async function readJson(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  if (typeof req.body === "string") {
+    try { return JSON.parse(req.body); } catch {}
+  }
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const txt = Buffer.concat(chunks).toString("utf8").trim();
+  return txt ? JSON.parse(txt) : {};
 }
 
-function isInternal(req) {
-  const raw = (req.headers['authorization'] || req.headers['x-api-key'] || '')
-    .toString()
-    .replace(/^Bearer\s+/i, '')
-    .trim();
-  return !!raw && raw === INTERNAL_TOKEN;
+// ────────────── Firebase init (solo Firestore, sin duplicar app) ──────────────
+let db = null;
+try {
+  const hasCred = !!process.env.GOOGLE_CREDENTIALS_JSON;
+  let credJson = null;
+  if (hasCred) {
+    try { credJson = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON); } catch (e) {
+      console.error("[programar-lanzamiento] GOOGLE_CREDENTIALS_JSON parse:", e?.message);
+    }
+  }
+  const app = admin.apps.length
+    ? admin.app()
+    : admin.initializeApp({
+        credential: credJson
+          ? admin.credential.cert(credJson)
+          : admin.credential.applicationDefault(),
+      });
+  db = admin.firestore(app);
+} catch (e) {
+  console.error("[programar-lanzamiento] Firebase init error:", e);
 }
 
-// ----- H A N D L E R -----
+// ────────────── Config / constantes ──────────────
+const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
+const FCM_TOKENS_FIELD  = "fcmTokens";
+const API_SECRET        = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "";
+
+// URL absoluta al sender
+function buildSendUrl() {
+  const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null;
+  const fallback  = "https://rampet-notification-server-three.vercel.app";
+  const base      = vercelUrl || fallback;
+  return `${base}/api/send-notification`;
+}
+
+// Crea title/body desde templateData o plantilla Firestore (fallback simple)
+async function buildMessage({ templateId, templateData }) {
+  // Fallback directo desde templateData (lo que ya manda el panel)
+  let title = templateData?.titulo || "RAMPET";
+  let body  = templateData?.descripcion || "";
+
+  // Si querés usar plantillas Firestore:
+  // Colección: plantillas_mensajes  |  IDs: nueva_campana, recordatorio_campana, etc.
+  try {
+    if (db && templateId) {
+      const doc = await db.collection("plantillas_mensajes").doc(templateId).get();
+      if (doc.exists) {
+        const t = doc.data() || {};
+        if (t.titulo) {
+          title = t.titulo.replace(/\{(\w+)\}/g, (_, k) => String(templateData?.[k] ?? ""));
+        }
+        if (t.cuerpo) {
+          body = t.cuerpo.replace(/\{(\w+)\}/g, (_, k) => String(templateData?.[k] ?? ""));
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[programar-lanzamiento] buildMessage plantilla warn:", e?.message);
+  }
+
+  return { title, body };
+}
+
+// Obtiene clienteIds para envío (si el panel no los manda)
+async function collectClienteIdsIfMissing() {
+  if (!db) return [];
+  const ids = [];
+  try {
+    // Estrategia simple y robusta: leer todos y filtrar por fcmTokens con algo dentro
+    const snap = await db.collection(CLIENTS_COLLECTION).get();
+    snap.forEach(doc => {
+      const data = doc.data() || {};
+      const arr  = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
+      if (arr.length > 0) ids.push(doc.id);
+    });
+  } catch (e) {
+    console.error("[programar-lanzamiento] collectClienteIds error:", e?.message || e);
+  }
+  return ids;
+}
+
+// ────────────── Handler ──────────────
 export default async function handler(req, res) {
-  const origin  = req.headers.origin || '';
-  const allowed = originAllowed(origin) || isInternal(req);
+  const origin = req.headers.origin || "";
+  setCors(res, origin);
 
-  // Preflight
-  if (req.method === 'OPTIONS') {
-    if (!allowed) return res.status(403).end();
-    // Headers CORS
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k, v]) => res.setHeader(k, v));
+  if (req.method === "OPTIONS") {
+    if (!originAllowed(origin)) return res.status(403).end();
     return res.status(204).end();
   }
 
-  // Solo POST
-  if (!allowed) {
-    return res.status(403).json({ ok: false, error: 'Origin not allowed', origin });
-  }
-  if (req.method !== 'POST') {
-    return res.status(405).json({ ok: false, error: 'Method not allowed' });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  // CORS en la respuesta real
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k, v]) => res.setHeader(k, v));
+  if (!originAllowed(origin)) {
+    return res.status(403).json({ ok: false, error: "Origin not allowed" });
+  }
 
   try {
-    const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
+    const body = await readJson(req);
 
-    // Reenvío al worker real con el secreto interno (server-to-server)
-    const r = await fetch(SCHEDULER_URL, {
-      method: 'POST',
+    // Lo que hoy envía el panel (tu captura):
+    // { campaignId, tipoNotificacion, templateId, templateData, fechaNotificacion }
+    const {
+      campaignId,
+      tipoNotificacion,     // "lanzamiento" => enviar ahora
+      templateId,
+      templateData = {},
+      fechaNotificacion,    // no lo usamos si es "inmediata"
+      tokens,               // si alguna vez el panel los manda, se respetan
+      clienteIds,           // idem
+      emails,               // idem
+      data                  // datos extra opcionales
+    } = body || {};
+
+    // 1) Armar mensaje
+    const { title, body: msgBody } = await buildMessage({ templateId, templateData });
+
+    // 2) Decidir destinatarios
+    let clienteIdsToUse = Array.isArray(clienteIds) ? clienteIds.filter(Boolean) : [];
+    if ((!tokens || tokens.length === 0) && clienteIdsToUse.length === 0) {
+      // Si el panel no mandó nada, buscamos TODOS los clientes con fcmTokens
+      clienteIdsToUse = await collectClienteIdsIfMissing();
+    }
+
+    // 3) Construir payload para el sender (tiene fallback a clienteIds → tokens)
+    const senderPayload = {
+      title,
+      body: msgBody,
+      // si el panel envía tokens, se usan; si no, el sender deduce por clienteIds
+      ...(Array.isArray(tokens) && tokens.length ? { tokens } : {}),
+      ...(Array.isArray(clienteIdsToUse) && clienteIdsToUse.length ? { clienteIds: clienteIdsToUse } : {}),
+      ...(Array.isArray(emails) && emails.length ? { emails } : {}),
+      data: {
+        campaignId: campaignId || templateData?.campaignId || "",
+        tipoNotificacion: tipoNotificacion || "lanzamiento",
+        templateId: templateId || "",
+        ...(data || {})
+      }
+    };
+
+    // 4) Reenvío server-to-server al sender
+    const url = buildSendUrl();
+    const r = await fetch(url, {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${INTERNAL_TOKEN}`,
+        "Content-Type": "application/json",
+        // Auth interna para el sender:
+        "Authorization": `Bearer ${API_SECRET}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(senderPayload),
     });
 
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return res.status(r.status).json({ ok: false, schedulerStatus: r.status, schedulerBody: data });
-    }
-    return res.status(200).json({ ok: true, result: data });
-  } catch (err) {
-    console.error('programar-lanzamiento error:', err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    const json = await r.json().catch(() => ({}));
+    return res.status(200).json({
+      ok: true,
+      result: {
+        ok: r.ok,
+        schedulerStatus: r.status,
+        ...json, // incluye successCount/failureCount/invalidTokens/emails/cleanedDocs
+      },
+    });
+  } catch (e) {
+    console.error("[programar-lanzamiento] error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
