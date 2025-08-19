@@ -3,31 +3,31 @@
 // 👉 Vercel sólo acepta: 'nodejs' | 'edge'
 export const config = { runtime: 'nodejs' };
 
-// Orígenes permitidos (separados por coma en la env var)
-// Ej: CORS_ALLOWED_ORIGINS="http://127.0.0.1:5500,https://tu-panel.com"
+// ----- C O N F I G -----
 const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
-// Token interno (secreto) para llamadas server-to-server
+// Secreto interno para llamadas server-to-server (panel NO lo usa)
 const INTERNAL_TOKEN = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || '';
 
-// Worker real que encola en QStash y dispara el envío
-// (NO apuntar a este mismo archivo)
-const SCHEDULER_URL =
+// Worker real que ejecuta el envío (NUNCA apuntar a este mismo endpoint)
+const SCHEDULER_URL = (
   process.env.NOTIF_SCHEDULER_URL
-  || `https://${process.env.VERCEL_URL || 'rampet-notification-server-three.vercel.app'}/api/send-notification`;
+  || `https://${process.env.VERCEL_URL || 'rampet-notification-server-three.vercel.app'}/api/send-notification`
+);
 
-// --- helpers CORS ---
+// ----- H E L P E R S  C O R S -----
 function originAllowed(origin) {
   if (!origin) return false;
-  try { return ALLOWED.includes(new URL(origin).origin); }
-  catch { return ALLOWED.includes(origin); }
+  try {
+    return ALLOWED.includes(new URL(origin).origin);
+  } catch {
+    return ALLOWED.includes(origin);
+  }
 }
-function isInternal(req) {
-  const raw = (req.headers['authorization'] || req.headers['x-api-key'] || '')
-    .toString().replace(/^Bearer\s+/i,'').trim();
-  return !!raw && raw === INTERNAL_TOKEN;
-}
+
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
@@ -38,7 +38,15 @@ function corsHeaders(origin) {
   };
 }
 
-// --- handler ---
+function isInternal(req) {
+  const raw = (req.headers['authorization'] || req.headers['x-api-key'] || '')
+    .toString()
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+  return !!raw && raw === INTERNAL_TOKEN;
+}
+
+// ----- H A N D L E R -----
 export default async function handler(req, res) {
   const origin  = req.headers.origin || '';
   const allowed = originAllowed(origin) || isInternal(req);
@@ -46,16 +54,23 @@ export default async function handler(req, res) {
   // Preflight
   if (req.method === 'OPTIONS') {
     if (!allowed) return res.status(403).end();
+    // Headers CORS
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k,v]) => res.setHeader(k,v));
+    Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k, v]) => res.setHeader(k, v));
     return res.status(204).end();
   }
 
-  if (!allowed) return res.status(403).json({ ok:false, error:'Origin not allowed', origin });
-  if (req.method !== 'POST') return res.status(405).json({ ok:false, error:'Method not allowed' });
+  // Solo POST
+  if (!allowed) {
+    return res.status(403).json({ ok: false, error: 'Origin not allowed', origin });
+  }
+  if (req.method !== 'POST') {
+    return res.status(405).json({ ok: false, error: 'Method not allowed' });
+  }
 
+  // CORS en la respuesta real
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k,v]) => res.setHeader(k,v));
+  Object.entries(corsHeaders(origin || (ALLOWED[0] || '*'))).forEach(([k, v]) => res.setHeader(k, v));
 
   try {
     const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
@@ -72,11 +87,11 @@ export default async function handler(req, res) {
 
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      return res.status(r.status).json({ ok:false, schedulerStatus:r.status, schedulerBody:data });
+      return res.status(r.status).json({ ok: false, schedulerStatus: r.status, schedulerBody: data });
     }
-    return res.status(200).json({ ok:true, result:data });
+    return res.status(200).json({ ok: true, result: data });
   } catch (err) {
     console.error('programar-lanzamiento error:', err);
-    return res.status(500).json({ ok:false, error:String(err?.message || err) });
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
