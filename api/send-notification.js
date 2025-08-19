@@ -1,12 +1,14 @@
 // /api/send-notification.js (Vercel runtime "nodejs" – ESM)
 export const config = { runtime: 'nodejs' };
 
-// ───────────────── Firebase Admin (ESM) ─────────────────
+// ────────────────────────── Imports ──────────────────────────
 import admin from "firebase-admin";
+import sgMail from "@sendgrid/mail";
 
-let messaging;
+// ───────────────── Firebase Admin (ESM) ─────────────────
 let firebaseInitError = null;
 let firebaseApp = null;
+let messaging = null;
 let db = null;
 
 try {
@@ -48,7 +50,7 @@ function isAuthorized(req) {
 }
 
 // ───────────────── Config de datos ─────────────────
-// Si tu colección NO se llama 'clientes', cambiala acá:
+// Si tu colección NO se llama 'clientes', cambiala con la env CLIENTS_COLLECTION
 const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
 const FCM_TOKENS_FIELD = "fcmTokens";
 
@@ -102,7 +104,7 @@ function chunk(arr, size) {
   return res;
 }
 
-// Limpieza automática de tokens inválidos en Firestore
+// ───────────── Limpieza automática de tokens inválidos ─────────────
 async function cleanupInvalidTokens(invalidTokens = []) {
   if (!db || invalidTokens.length === 0) return { cleanedDocs: 0 };
 
@@ -130,7 +132,77 @@ async function cleanupInvalidTokens(invalidTokens = []) {
   return { cleanedDocs };
 }
 
-// ───────────────── Handler ─────────────────
+// ───────────── Emails (SendGrid) ─────────────
+function isLikelyEmail(s) {
+  return typeof s === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
+}
+
+async function collectEmails({ emails = [], clienteIds = [] }) {
+  const set = new Set();
+
+  // 1) Directos en el payload
+  (emails || []).forEach(e => { if (isLikelyEmail(e)) set.add(e.trim()); });
+
+  // 2) Buscar por IDs en Firestore
+  if (db && Array.isArray(clienteIds) && clienteIds.length > 0) {
+    const gets = clienteIds.map(id => db.collection(CLIENTS_COLLECTION).doc(String(id)).get());
+    const docs = await Promise.all(gets);
+    docs.forEach(d => {
+      if (d.exists) {
+        const data = d.data() || {};
+        if (isLikelyEmail(data.email)) set.add(String(data.email).trim());
+        // Si tuvieras un array de emails, podés ampliarlo acá
+        if (Array.isArray(data.emails)) {
+          data.emails.forEach(e => { if (isLikelyEmail(e)) set.add(e.trim()); });
+        }
+      }
+    });
+  }
+
+  return Array.from(set);
+}
+
+async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
+  const key = process.env.SENDGRID_API_KEY || "";
+  const from = process.env.SENDGRID_FROM_EMAIL || "";
+
+  if (!key || !from) {
+    return { attempted: 0, sent: 0, failed: toList.length, skipped: true, errors: ["SendGrid no configurado"] };
+  }
+
+  sgMail.setApiKey(key);
+
+  const msgs = toList.map(to => ({
+    to,
+    from,
+    subject: subject || "RAMPET",
+    html: htmlBody || `<p>${(textBody || "").replace(/\n/g, "<br>")}</p>`,
+    text: textBody || "",
+  }));
+
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+
+  // Enviar en tandas para ser prolijos con el API
+  const batches = chunk(msgs, 500);
+  for (const batch of batches) {
+    try {
+      const res = await sgMail.send(batch, { batch: true });
+      // `res` puede ser un array de respuestas; contamos length como enviados
+      sent += Array.isArray(res) ? res.length : batch.length;
+    } catch (e) {
+      failed += batch.length;
+      errors.push(String(e?.message || e));
+      console.error("[send-notification] SendGrid batch error:", e);
+    }
+  }
+
+  console.log(`[send-notification] Emails procesados: ${sent} enviados, ${failed} fallidos.`);
+  return { attempted: toList.length, sent, failed, skipped: false, errors };
+}
+
+// ────────────────────────── Handler ──────────────────────────
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -154,8 +226,19 @@ export default async function handler(req, res) {
   try {
     const body = await readJson(req);
 
-    // Estructura esperada:
-    // { tokens?: string[], topic?: string, title?: string, body?: string, icon?, badge?, link?, data?: {} }
+    // Payload flexible:
+    // {
+    //   tokens?: string[],
+    //   topic?: string,
+    //   title?: string,
+    //   body?: string,
+    //   icon?: string,
+    //   badge?: string,
+    //   link?: string,
+    //   data?: Record<string,string|...>,
+    //   emails?: string[],           // ← opcional (envío directo)
+    //   clienteIds?: (string|number)[] // ← opcional (buscar emails en Firestore)
+    // }
     const {
       tokens = [],
       topic,
@@ -165,58 +248,75 @@ export default async function handler(req, res) {
       badge,
       link,
       data = {},
+      emails = [],
+      clienteIds = [],
     } = body || {};
 
+    // ───────────── WebPush ─────────────
     const webpush = buildWebpushPayload({ title, body: nBody, icon, badge, link });
     const safeData = toStringData(data);
 
-    // Envío por topic
+    let pushResult = {
+      ok: true,
+      mode: "none",
+      successCount: 0,
+      failureCount: 0,
+      invalidTokens: [],
+      cleanedDocs: 0,
+    };
+
     if (topic && (!tokens || tokens.length === 0)) {
       const msg = { topic, webpush, ...(Object.keys(safeData).length ? { data: safeData } : {}) };
       const messageId = await messaging.send(msg, false);
-      return res.status(200).json({ ok: true, mode: "topic", messageId, cleanedDocs: 0, invalidTokens: [] });
-    }
+      pushResult = { ok: true, mode: "topic", successCount: 1, failureCount: 0, invalidTokens: [], cleanedDocs: 0, messageId };
+    } else if (Array.isArray(tokens) && tokens.length > 0) {
+      // FCM permite hasta 500 por lote
+      const batches = chunk(tokens, 500);
+      let success = 0, failure = 0;
+      const invalidTokens = [];
 
-    // Envío por tokens
-    if (!Array.isArray(tokens) || tokens.length === 0) {
-      return res.status(400).json({ ok: false, error: "Faltan tokens o topic" });
-    }
+      for (const tk of batches) {
+        const msg = { tokens: tk, webpush, ...(Object.keys(safeData).length ? { data: safeData } : {}) };
+        const r = await messaging.sendEachForMulticast(msg);
 
-    // FCM permite hasta 500 por lote
-    const batches = chunk(tokens, 500);
-    let success = 0, failure = 0;
-    const invalidTokens = [];
+        success += r.successCount;
+        failure += r.failureCount;
 
-    for (const tk of batches) {
-      const msg = { tokens: tk, webpush, ...(Object.keys(safeData).length ? { data: safeData } : {}) };
-      const r = await messaging.sendEachForMulticast(msg);
-
-      success += r.successCount;
-      failure += r.failureCount;
-
-      r.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const code = resp.error?.code || "";
-          if (
-            code === "messaging/registration-token-not-registered" ||
-            code === "messaging/invalid-argument"
-          ) {
-            invalidTokens.push(tk[idx]);
+        r.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            const code = resp.error?.code || "";
+            if (
+              code === "messaging/registration-token-not-registered" ||
+              code === "messaging/invalid-argument"
+            ) {
+              invalidTokens.push(tk[idx]);
+            }
           }
-        }
-      });
-    }
+        });
+      }
 
-    // Limpieza automática
-    const { cleanedDocs } = await cleanupInvalidTokens(invalidTokens);
+      const { cleanedDocs } = await cleanupInvalidTokens(invalidTokens);
+      pushResult = { ok: true, mode: "multicast", successCount: success, failureCount: failure, invalidTokens, cleanedDocs };
+    } // si no hay tokens ni topic, no se envía push (queda ok: true, mode: "none")
+
+    // ───────────── Emails (opcional) ─────────────
+    let emailResult = { attempted: 0, sent: 0, failed: 0, skipped: true, errors: [] };
+
+    // Solo intentamos email si viene algo para enviar
+    if ((emails && emails.length) || (clienteIds && clienteIds.length)) {
+      const list = await collectEmails({ emails, clienteIds });
+      if (list.length > 0) {
+        const subject = title || "RAMPET";
+        const textBody = String(nBody || "");
+        const htmlBody = `<p>${textBody.replace(/\n/g, "<br>")}</p>`;
+        emailResult = await sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList: list });
+      }
+    }
 
     return res.status(200).json({
       ok: true,
-      mode: "multicast",
-      successCount: success,
-      failureCount: failure,
-      invalidTokens,
-      cleanedDocs, // ← cuantos documentos fueron actualizados
+      ...pushResult,
+      emails: emailResult,
     });
   } catch (err) {
     console.error("send-notification error:", err);
