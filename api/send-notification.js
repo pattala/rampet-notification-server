@@ -4,7 +4,7 @@ export const config = { runtime: "nodejs" };
 import admin from "firebase-admin";
 import sgMail from "@sendgrid/mail";
 
-// ────────────── CORS (única fuente) ──────────────
+// ────────────── CORS ──────────────
 function parseAllowedOrigins() {
   const raw = (process.env.CORS_ALLOWED_ORIGINS || "").trim();
   return raw ? raw.split(",").map(s => s.trim()).filter(Boolean) : [];
@@ -69,7 +69,9 @@ try {
 const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
 const FCM_TOKENS_FIELD  = "fcmTokens";
 
-const API_SECRET = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "";
+const API_SECRET_RAW = (process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "");
+const API_SECRET     = API_SECRET_RAW.trim();  // <= TRIM MUY IMPORTANTE
+
 const PWA_URL    = process.env.PWA_URL || "https://rampet.vercel.app";
 const PUSH_ICON  = process.env.PUSH_ICON_URL || "";
 const PUSH_BADGE = process.env.PUSH_BADGE_URL || "";
@@ -79,20 +81,17 @@ const SENDGRID_FROM = process.env.SENDGRID_FROM_EMAIL || "";
 
 function getIncomingApiKey(req) {
   // Authorization: Bearer xxx
-  const auth = req.headers.authorization || req.headers.Authorization || "";
-  if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) {
-    return auth.slice(7).trim();
-  }
+  const auth = (req.headers.authorization || req.headers.Authorization || "").toString();
+  if (auth.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
   // x-api-key (o variantes)
   const x = req.headers["x-api-key"] || req.headers["x-api-secret"] || req.headers["x-rampet-key"];
-  return (Array.isArray(x) ? x[0] : x) || "";
+  return (Array.isArray(x) ? x[0] : (x || "")).toString().trim();
 }
+
 function isLikelyEmail(s) {
   return typeof s === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 }
-const chunk = (arr, n) => {
-  const out = []; for (let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out;
-};
+const chunk = (arr, n) => { const out=[]; for (let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; };
 
 // Recolecta emails desde clienteIds
 async function collectEmails({ emails = [], clienteIds = [] }) {
@@ -118,9 +117,7 @@ async function collectEmails({ emails = [], clienteIds = [] }) {
 async function collectTokensFromClienteIds(clienteIds = []) {
   if (!db || !Array.isArray(clienteIds) || clienteIds.length === 0) return [];
   const set = new Set();
-  const gets = clienteIds.map(id =>
-    db.collection(CLIENTS_COLLECTION).doc(String(id)).get()
-  );
+  const gets = clienteIds.map(id => db.collection(CLIENTS_COLLECTION).doc(String(id)).get());
   const docs = await Promise.all(gets);
   docs.forEach(d => {
     if (!d.exists) return;
@@ -141,7 +138,7 @@ async function removeInvalidTokensFromDocs(clienteIds = [], invalidTokens = []) 
       if (!snap.exists) continue;
       const data = snap.data() || {};
       const before = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
-      const after = before.filter(t => !invalidTokens.includes(t));
+      const after  = before.filter(t => !invalidTokens.includes(t));
       if (after.length !== before.length) {
         await ref.update({ [FCM_TOKENS_FIELD]: after });
         cleaned++;
@@ -157,7 +154,6 @@ async function removeInvalidTokensFromDocs(clienteIds = [], invalidTokens = []) 
 async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   const key = SENDGRID_KEY;
   const from = SENDGRID_FROM;
-
   if (!key || !from) {
     return { attempted: 0, sent: 0, failed: toList.length, skipped: true, errors: ["SendGrid no configurado"] };
   }
@@ -172,19 +168,13 @@ async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
 
   let sent = 0, failed = 0; const errors = [];
   for (const batch of chunk(msgs, 500)) {
-    try {
-      // sgMail.send puede ser [res,...] o un objeto; contamos por cantidad enviada
-      await sgMail.send(batch, { batch: true });
-      sent += batch.length;
-    } catch (e) {
-      failed += batch.length;
-      errors.push(String(e?.message || e));
-    }
+    try { await sgMail.send(batch, { batch: true }); sent += batch.length; }
+    catch (e) { failed += batch.length; errors.push(String(e?.message || e)); }
   }
   return { attempted: sent + failed, sent, failed, skipped: false, errors };
 }
 
-// ────────────── Handler principal ──────────────
+// ────────────── Handler ──────────────
 export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   setCors(res, origin);
@@ -198,9 +188,13 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  // Auth interna
+  // Auth interna (con logs mínimos)
   const incoming = getIncomingApiKey(req);
-  if (!API_SECRET || !incoming || String(incoming) !== String(API_SECRET)) {
+  const incomingLen = (incoming || "").length;
+  const secretLen   = (API_SECRET || "").length;
+  console.log("[send-notification][auth] secret_present:", !!API_SECRET, "incoming_present:", !!incoming, "lens:", { incomingLen, secretLen });
+
+  if (!API_SECRET || !incoming || incoming !== API_SECRET) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
@@ -215,7 +209,7 @@ export default async function handler(req, res) {
       data = {},
     } = body || {};
 
-    // Fallbacks de destinatarios
+    // Fallbacks: si viene clienteIds, completamos tokens/emails desde Firestore
     if ((!tokens || tokens.length === 0) && Array.isArray(clienteIds) && clienteIds.length > 0) {
       tokens = await collectTokensFromClienteIds(clienteIds);
       if (!Array.isArray(emails) || emails.length === 0) {
@@ -223,25 +217,19 @@ export default async function handler(req, res) {
       }
     }
 
-    // Envío PUSH si hay tokens
+    // PUSH
     let successCount = 0, failureCount = 0, invalidTokens = [], cleanedDocs = 0, mode = "none";
     if (Array.isArray(tokens) && tokens.length > 0 && messaging) {
       mode = "multicast";
-      // Asegurar strings en data
       const dataForFCM = {};
       Object.entries(data || {}).forEach(([k,v]) => { dataForFCM[k] = typeof v === "string" ? v : JSON.stringify(v); });
 
       const fcmPayload = {
         tokens,
-        notification: undefined, // usamos webpush.notification para mostrar con PWA cerrada
+        notification: undefined,
         data: dataForFCM,
         webpush: {
-          notification: {
-            title,
-            body: notifBody,
-            icon: PUSH_ICON || undefined,
-            badge: PUSH_BADGE || undefined,
-          },
+          notification: { title, body: notifBody, icon: PUSH_ICON || undefined, badge: PUSH_BADGE || undefined },
           fcmOptions: { link: PWA_URL },
         },
       };
@@ -250,7 +238,6 @@ export default async function handler(req, res) {
       successCount = resp.successCount;
       failureCount = resp.failureCount;
 
-      // tokens inválidos
       resp.responses.forEach((r, idx) => {
         if (!r.success) {
           const errCode = r.error?.errorInfo?.code || r.error?.code || "";
@@ -265,10 +252,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // Envío EMAILS (independiente de tokens)
+    // EMAILS (independiente de tokens)
     let emailReport = { attempted: 0, sent: 0, failed: 0, skipped: true, errors: [] };
     if (!Array.isArray(emails) || emails.length === 0) {
-      // si sólo vinieron clienteIds, recolecto emails por ids
       if (Array.isArray(clienteIds) && clienteIds.length > 0) {
         emails = await collectEmails({ emails: [], clienteIds });
       }
@@ -284,11 +270,8 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      mode,
-      successCount,
-      failureCount,
-      invalidTokens,
-      cleanedDocs,
+      mode, successCount, failureCount,
+      invalidTokens, cleanedDocs,
       emails: emailReport,
     });
   } catch (e) {
