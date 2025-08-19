@@ -126,6 +126,43 @@ async function collectClienteIdsIfMissing() {
   return ids;
 }
 
+// Recolecta destinatarios por defecto desde Firestore (tokens + emails + ids)
+async function collectRecipientsDefault() {
+  const result = { tokens: [], emails: [], clienteIds: [] };
+  if (!db) return result;
+
+  const isLikelyEmail = (s) =>
+    typeof s === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s?.trim());
+
+  const tokenSet = new Set();
+  const emailSet = new Set();
+  const ids = [];
+
+  try {
+    const snap = await db.collection(CLIENTS_COLLECTION).get();
+    snap.forEach(doc => {
+      const data = doc.data() || {};
+
+      // id del cliente
+      ids.push(doc.id);
+
+      // Tokens
+      const arr = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
+      arr.forEach(t => { if (typeof t === "string" && t.trim()) tokenSet.add(t.trim()); });
+
+      // Email
+      if (isLikelyEmail(data.email)) emailSet.add(String(data.email).trim());
+    });
+  } catch (e) {
+    console.error("[programar-lanzamiento] collectRecipientsDefault error:", e?.message || e);
+  }
+
+  result.tokens = Array.from(tokenSet);
+  result.emails = Array.from(emailSet);
+  result.clienteIds = ids;
+  return result;
+}
+
 // ───────────────────── Handler ─────────────────────
 export default async function handler(req, res) {
   const origin = req.headers.origin || "";
@@ -148,7 +185,7 @@ export default async function handler(req, res) {
   try {
     const payload = await readJson(req);
 
-    // Lo que manda el panel hoy (tu captura):
+    // Lo que manda el panel hoy (según tu captura):
     // { campaignId, tipoNotificacion, templateId, templateData, fechaNotificacion }
     const {
       campaignId,
@@ -165,19 +202,32 @@ export default async function handler(req, res) {
     // 1) Armar mensaje
     const { title, body } = await buildMessage({ templateId, templateData });
 
-    // 2) Resolver destinatarios por defecto si faltan
+    // 2) Resolver destinatarios (con fallbacks)
     let clienteIdsToUse = Array.isArray(clienteIds) ? clienteIds.filter(Boolean) : [];
-    if ((!tokens || tokens.length === 0) && clienteIdsToUse.length === 0) {
+    let tokensToUse     = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
+    let emailsToUse     = Array.isArray(emails) ? emails.filter(Boolean) : [];
+
+    // 1er fallback: si no vinieron tokens ni clienteIds, armamos clienteIds por defecto
+    if (tokensToUse.length === 0 && clienteIdsToUse.length === 0) {
       clienteIdsToUse = await collectClienteIdsIfMissing();
     }
 
-    // 3) Payload para el sender (tiene fallback a clienteIds → tokens/emails)
+    // 2do fallback (último recurso): si sigue TODO vacío (tokens, ids y emails),
+    // juntamos DIRECTAMENTE tokens + emails + ids desde Firestore.
+    if (tokensToUse.length === 0 && clienteIdsToUse.length === 0 && emailsToUse.length === 0) {
+      const rec = await collectRecipientsDefault();
+      tokensToUse     = rec.tokens;
+      emailsToUse     = rec.emails;
+      clienteIdsToUse = rec.clienteIds;
+    }
+
+    // 3) Payload para el sender
     const senderPayload = {
       title,
       body,
-      ...(Array.isArray(tokens) && tokens.length ? { tokens } : {}),
-      ...(Array.isArray(clienteIdsToUse) && clienteIdsToUse.length ? { clienteIds: clienteIdsToUse } : {}),
-      ...(Array.isArray(emails) && emails.length ? { emails } : {}),
+      ...(tokensToUse.length ? { tokens: tokensToUse } : {}),
+      ...(clienteIdsToUse.length ? { clienteIds: clienteIdsToUse } : {}),
+      ...(emailsToUse.length ? { emails: emailsToUse } : {}),
       data: {
         campaignId: campaignId || templateData?.campaignId || "",
         tipoNotificacion: tipoNotificacion || "lanzamiento",
