@@ -151,7 +151,7 @@ async function collectEmails({ emails = [], clienteIds = [] }) {
       if (d.exists) {
         const data = d.data() || {};
         if (isLikelyEmail(data.email)) set.add(String(data.email).trim());
-        // Si tuvieras un array de emails, podés ampliarlo acá
+        // Si tuvieras un array de emails adicional en el doc:
         if (Array.isArray(data.emails)) {
           data.emails.forEach(e => { if (isLikelyEmail(e)) set.add(e.trim()); });
         }
@@ -159,6 +159,25 @@ async function collectEmails({ emails = [], clienteIds = [] }) {
     });
   }
 
+  return Array.from(set);
+}
+
+// Recolecta tokens (fcmTokens) a partir de clienteIds en Firestore
+async function collectTokensFromClienteIds(clienteIds = []) {
+  if (!db || !Array.isArray(clienteIds) || clienteIds.length === 0) return [];
+  const set = new Set();
+  const gets = clienteIds.map(id =>
+    db.collection(CLIENTS_COLLECTION).doc(String(id)).get()
+  );
+  const docs = await Promise.all(gets);
+  docs.forEach(d => {
+    if (!d.exists) return;
+    const data = d.data() || {};
+    const arr = Array.isArray(data[FCM_TOKENS_FIELD]) ? data[FCM_TOKENS_FIELD] : [];
+    arr.forEach(t => {
+      if (typeof t === "string" && t.trim()) set.add(t.trim());
+    });
+  });
   return Array.from(set);
 }
 
@@ -184,12 +203,11 @@ async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   let failed = 0;
   const errors = [];
 
-  // Enviar en tandas para ser prolijos con el API
+  // Enviar en tandas
   const batches = chunk(msgs, 500);
   for (const batch of batches) {
     try {
       const res = await sgMail.send(batch, { batch: true });
-      // `res` puede ser un array de respuestas; contamos length como enviados
       sent += Array.isArray(res) ? res.length : batch.length;
     } catch (e) {
       failed += batch.length;
@@ -236,8 +254,8 @@ export default async function handler(req, res) {
     //   badge?: string,
     //   link?: string,
     //   data?: Record<string,string|...>,
-    //   emails?: string[],           // ← opcional (envío directo)
-    //   clienteIds?: (string|number)[] // ← opcional (buscar emails en Firestore)
+    //   emails?: string[],
+    //   clienteIds?: (string|number)[]
     // }
     const {
       tokens = [],
@@ -256,6 +274,12 @@ export default async function handler(req, res) {
     const webpush = buildWebpushPayload({ title, body: nBody, icon, badge, link });
     const safeData = toStringData(data);
 
+    // Fallback: si no hay tokens, juntarlos desde clienteIds
+    let tokensToUse = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
+    if (tokensToUse.length === 0 && Array.isArray(clienteIds) && clienteIds.length > 0) {
+      tokensToUse = await collectTokensFromClienteIds(clienteIds);
+    }
+
     let pushResult = {
       ok: true,
       mode: "none",
@@ -265,13 +289,12 @@ export default async function handler(req, res) {
       cleanedDocs: 0,
     };
 
-    if (topic && (!tokens || tokens.length === 0)) {
+    if (topic && (!tokensToUse || tokensToUse.length === 0)) {
       const msg = { topic, webpush, ...(Object.keys(safeData).length ? { data: safeData } : {}) };
       const messageId = await messaging.send(msg, false);
       pushResult = { ok: true, mode: "topic", successCount: 1, failureCount: 0, invalidTokens: [], cleanedDocs: 0, messageId };
-    } else if (Array.isArray(tokens) && tokens.length > 0) {
-      // FCM permite hasta 500 por lote
-      const batches = chunk(tokens, 500);
+    } else if (Array.isArray(tokensToUse) && tokensToUse.length > 0) {
+      const batches = chunk(tokensToUse, 500);
       let success = 0, failure = 0;
       const invalidTokens = [];
 
@@ -297,12 +320,10 @@ export default async function handler(req, res) {
 
       const { cleanedDocs } = await cleanupInvalidTokens(invalidTokens);
       pushResult = { ok: true, mode: "multicast", successCount: success, failureCount: failure, invalidTokens, cleanedDocs };
-    } // si no hay tokens ni topic, no se envía push (queda ok: true, mode: "none")
+    }
 
     // ───────────── Emails (opcional) ─────────────
     let emailResult = { attempted: 0, sent: 0, failed: 0, skipped: true, errors: [] };
-
-    // Solo intentamos email si viene algo para enviar
     if ((emails && emails.length) || (clienteIds && clienteIds.length)) {
       const list = await collectEmails({ emails, clienteIds });
       if (list.length > 0) {
