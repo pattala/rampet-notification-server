@@ -6,18 +6,14 @@ import { resolveTemplate, applyBlocksAndVars, sanitizePush } from '../utils/temp
 
 // --- Init Firebase Admin ---
 if (!getApps().length) {
-  const creds = process.env.GOOGLE_CREDENTIALS_JSON
-    ? JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON)
-    : null;
+  const creds = process.env.GOOGLE_CREDENTIALS_JSON ? JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON) : null;
   initializeApp(creds ? { credential: cert(creds) } : {});
 }
 const db = getFirestore();
 const messaging = getMessaging();
 
 // --- CORS ---
-const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-
+const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 function cors(req, res) {
   const origin = req.headers.origin || '';
   if (ALLOWED.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
@@ -101,15 +97,10 @@ export default async function handler(req, res) {
     });
     if (targetClientId && invalid.length) {
       const ref = db.collection('clientes').doc(String(targetClientId));
-      await ref.update({ fcmTokens: FieldValue.arrayRemove(...invalid) });
+      await ref.update({ fcmTokens: FieldValue.arrayRemove(...invalid) }); // ← fix del spread
     }
 
-    return res.status(200).json({
-      ok: true,
-      successCount: resp.successCount,
-      failureCount: resp.failureCount,
-      invalidTokens: invalid.length,
-    });
+    return res.status(200).json({ ok: true, successCount: resp.successCount, failureCount: resp.failureCount, invalidTokens: invalid.length });
   } catch (err) {
     console.error('Error enviando push:', err);
     return res.status(500).json({ message: 'Error interno del servidor.', error: err.message });
