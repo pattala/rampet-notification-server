@@ -1,7 +1,7 @@
  // /api/proxy-programar-lanzamiento.js  (Node 18.x – Vercel)
 // Proxy CORS-friendly hacia el scheduler interno, con secreto solo del lado server.
 
-export const config = { runtime: 'nodejs18.x' };
+export const config = { runtime: 'nodejs };
 
 const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || "")
   .split(",")
