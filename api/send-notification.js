@@ -68,9 +68,8 @@ const API_SECRET = (process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "
 const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
 const FCM_TOKENS_FIELD  = "fcmTokens";
 
-const PWA_URL        = process.env.PWA_URL || "https://rampet.vercel.app";
-const PUSH_ICON_URL  = process.env.PUSH_ICON_URL || PWA_URL + "/icon-192.png";
-const PUSH_BADGE_URL = process.env.PUSH_BADGE_URL || PUSH_ICON_URL;
+const PWA_URL       = process.env.PWA_URL || "https://rampet.vercel.app";
+const PUSH_ICON_URL = process.env.PUSH_ICON_URL || (PWA_URL + "/icon-192.png");
 
 const SG_KEY  = (process.env.SENDGRID_API_KEY || "").trim();
 const SG_FROM = (process.env.SENDGRID_FROM_EMAIL || "").trim();
@@ -196,17 +195,11 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
     tokens: uniq,
     notification: { title, body }, // FCM la muestra automáticamente
     webpush: {
-      notification: { title, body, icon: PUSH_ICON_URL, badge: PUSH_BADGE_URL },
+      notification: { title, body, icon: PUSH_ICON_URL }, // ← SIN badge
       fcmOptions: { link: PWA_URL }
     },
-    // data incluye title/body/icon/badge: útil si alguna vez llega como data-only.
-    data: {
-      ...Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
-      title,
-      body,
-      icon: PUSH_ICON_URL,
-      badge: PUSH_BADGE_URL,
-    },
+    // data: SOLO metadatos; NO title/body/icon para no gatillar un segundo push en SW viejo
+    data: Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
   };
 
   const resp = await messaging.sendEachForMulticast(message);
@@ -318,7 +311,6 @@ export default async function handler(req, res) {
 
     const tpl = await loadTemplateDoc(templateId);
     if (tpl) {
-      // Reemplazo con placeholders
       const repl = (s) => applyPlaceholders(s, { ...templateData, titulo: pushTitle, descripcion: pushBody });
 
       // PUSH
@@ -332,26 +324,23 @@ export default async function handler(req, res) {
       emailSubject = repl(candEmailSubject);
       const candEmailHtml = tpl.cuerpo_email || tpl.html_email;
       if (candEmailHtml) emailHtml = repl(candEmailHtml);
-      // Si no hay HTML específico, usamos texto plano de push o genérico
       emailText = repl(tpl.cuerpo_email ? (tpl.cuerpo || pushBody) : pushBody);
     } else {
-      // Sin plantilla: usar lo que vino en el payload
       emailSubject = pushTitle;
       emailText    = pushBody;
     }
 
-    // Si no vino HTML en plantilla, usamos wrapper HTML
     const htmlBody = emailHtml || renderEmailHtml({ title: emailSubject, body: emailText, templateData });
 
     // --- 2) Push
     const pushResp = await sendPushMulticast({
       title: pushTitle,
-      body: emailText, // alineado con emailText (placeholders ya aplicados)
+      body: emailText,
       tokens: allTokens,
       data: {
         ...Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
         templateId: String(templateId || ""),
-        clienteIds: clienteIds, // para limpieza opcional
+        clienteIds: clienteIds,
       },
     });
 
