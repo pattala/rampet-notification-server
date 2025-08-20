@@ -1,4 +1,4 @@
-// /api/send-notification.js  (Vercel runtime "nodejs" – ESM)
+ // /api/send-notification.js  (Vercel runtime "nodejs" – ESM)
 export const config = { runtime: "nodejs" };
 
 import admin from "firebase-admin";
