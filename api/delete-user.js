@@ -1,4 +1,4 @@
-// api/delete-user.js
+//api/delete-user.js
 import admin from "firebase-admin";
 
 /* ---------- CORS helpers ---------- */
