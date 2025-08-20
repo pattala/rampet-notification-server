@@ -26,6 +26,17 @@ function setCors(res, origin) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
+// Llamada interna server-to-server (con API secret) => permitir aunque no haya Origin
+function isInternal(req) {
+  const h = req.headers || {};
+  const key  = (process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "").trim();
+  const auth = (h.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const xKey = (h["x-api-key"] || "").trim();
+  return !!key && (auth === key || xKey === key);
+}
+
+
+
 /* ───────────────────── Firebase init ───────────────────── */
 let messaging = null;
 let db = null;
@@ -248,9 +259,10 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
-  if (!originAllowed(origin)) {
-    return res.status(403).json({ ok: false, error: "Origin not allowed" });
-  }
+ // Permitir llamadas internas (programar-lanzamiento -> send-notification) aunque no haya Origin
+if (!originAllowed(origin) && !isInternal(req)) {
+  return res.status(403).json({ ok: false, error: "Origin not allowed" });
+}
 
   try {
     // Auth
