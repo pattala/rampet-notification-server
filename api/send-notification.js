@@ -35,8 +35,6 @@ function isInternal(req) {
   return !!key && (auth === key || xKey === key);
 }
 
-
-
 /* ───────────────────── Firebase init ───────────────────── */
 let messaging = null;
 let db = null;
@@ -91,6 +89,12 @@ async function readJson(req) {
 const isLikelyEmail = (s) =>
   typeof s === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+}
+
 /* ───────────────────── Destinatarios ───────────────────── */
 async function collectTokensFromClienteIds(clienteIds = []) {
   if (!db || !Array.isArray(clienteIds) || clienteIds.length === 0) return [];
@@ -125,11 +129,28 @@ async function collectEmails({ emails = [], clienteIds = [] }) {
   return Array.from(set);
 }
 
-/* ───────────────────── Email Template ───────────────────── */
+/* ───────────────────── Plantillas ───────────────────── */
+// Reemplaza {placeholders} por datos de templateData
 function applyPlaceholders(str, data = {}) {
-  // {nombre_campana}, {cuerpo_campana}, etc.
   return String(str || "").replace(/\{(\w+)\}/g, (_, k) => String(data?.[k] ?? ""));
 }
+
+async function loadTemplateDoc(templateId) {
+  if (!db || !templateId) return null;
+  const candidates = [
+    ["plantillas", templateId],            // colección actual que mostraste en screenshot
+    ["plantillas_mensajes", templateId],   // por compatibilidad con tu esquema anterior
+  ];
+  for (const [col, id] of candidates) {
+    try {
+      const doc = await db.collection(col).doc(id).get();
+      if (doc.exists) return doc.data() || null;
+    } catch (e) { /* ignore */ }
+  }
+  return null;
+}
+
+/* ───────────────────── Email HTML fallback ───────────────────── */
 function renderEmailHtml({ title, body, templateData }) {
   const vig = (templateData?.vence_text || "").trim();
   const VIG_TXT = vig ? `Vigencia: ${vig}` : "";
@@ -161,11 +182,6 @@ function renderEmailHtml({ title, body, templateData }) {
 </body>
 </html>`;
 }
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-    .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
-}
 
 /* ───────────────────── Envíos ───────────────────── */
 async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
@@ -173,7 +189,7 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
     return { successCount: 0, failureCount: 0, invalidTokens: [] };
   }
 
-  // DEDUPE: garantizamos 1 solo envío
+  // DEDUPE: garantizamos 1 solo envío por token
   const uniq = Array.from(new Set(tokens.map(t => (t || "").trim()).filter(Boolean)));
 
   const message = {
@@ -183,6 +199,7 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
       notification: { title, body, icon: PUSH_ICON_URL, badge: PUSH_BADGE_URL },
       fcmOptions: { link: PWA_URL }
     },
+    // ¡OJO!: data SIN title/body para no interferir con el SW
     data: Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
   };
 
@@ -235,8 +252,7 @@ async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   for (let i=0; i<msgs.length; i+=chunkSize) {
     const batch = msgs.slice(i, i+chunkSize);
     try {
-      const res = await sgMail.send(batch, { batch: true });
-      // Si no tira, contabilizamos como enviado
+      await sgMail.send(batch, { batch: true });
       sent += batch.length;
     } catch (e) {
       failed += batch.length;
@@ -259,10 +275,10 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
- // Permitir llamadas internas (programar-lanzamiento -> send-notification) aunque no haya Origin
-if (!originAllowed(origin) && !isInternal(req)) {
-  return res.status(403).json({ ok: false, error: "Origin not allowed" });
-}
+  // Permitir llamadas internas (programar-lanzamiento -> send-notification) aunque no haya Origin
+  if (!originAllowed(origin) && !isInternal(req)) {
+    return res.status(403).json({ ok: false, error: "Origin not allowed" });
+  }
 
   try {
     // Auth
@@ -282,27 +298,49 @@ if (!originAllowed(origin) && !isInternal(req)) {
       data = {}
     } = await readJson(req);
 
-    // 1) Unificamos tokens y emails con dedupe
+    // --- 0) Destinatarios
     const tokensFromIds = await collectTokensFromClienteIds(clienteIds);
     const allTokens = Array.from(new Set([...(tokens || []), ...tokensFromIds].map(t => (t || "").trim()).filter(Boolean)));
-
     const allEmails = await collectEmails({ emails, clienteIds });
 
-    // 2) Email template (si no viene HTML ya listo)
-    //    subject = title; body = con placeholders + [TEXTO_VIGENCIA]
-    const subject = title || templateData?.titulo || "RAMPET";
-    const baseBody = body || templateData?.descripcion || "";
-    const emailBody = applyPlaceholders(baseBody, {
-      nombre_campana: templateData?.titulo || subject,
-      cuerpo_campana: baseBody,
-      ...templateData,
-    });
-    const htmlBody = renderEmailHtml({ title: subject, body: emailBody, templateData });
+    // --- 1) Cargar plantilla (si existe) y preparar textos por canal
+    let pushTitle   = title || templateData?.titulo || "RAMPET";
+    let pushBody    = body  || templateData?.descripcion || "";
+    let emailSubject = pushTitle;
+    let emailText    = pushBody;
+    let emailHtml    = null;
 
-    // 3) Push
+    const tpl = await loadTemplateDoc(templateId);
+    if (tpl) {
+      // Reemplazo con placeholders
+      const repl = (s) => applyPlaceholders(s, { ...templateData, titulo: pushTitle, descripcion: pushBody });
+
+      // PUSH
+      const candPushTitle = tpl.titulo_push || tpl.titulo;
+      const candPushBody  = tpl.cuerpo_push || tpl.cuerpo;
+      if (candPushTitle) pushTitle = repl(candPushTitle);
+      if (candPushBody)  pushBody  = repl(candPushBody);
+
+      // EMAIL
+      const candEmailSubject = tpl.titulo_email || tpl.titulo || pushTitle;
+      emailSubject = repl(candEmailSubject);
+      const candEmailHtml = tpl.cuerpo_email || tpl.html_email;
+      if (candEmailHtml) emailHtml = repl(candEmailHtml);
+      // si no hay HTML específico, el texto plano toma cuerpo genérico o de push
+      emailText = repl(tpl.cuerpo_email ? (tpl.cuerpo || pushBody) : pushBody);
+    } else {
+      // Sin plantilla: usar lo que vino en el payload como hasta ahora
+      emailSubject = pushTitle;
+      emailText    = pushBody;
+    }
+
+    // Si no vino HTML en plantilla, usamos el wrapper HTML existente
+    const htmlBody = emailHtml || renderEmailHtml({ title: emailSubject, body: emailText, templateData });
+
+    // --- 2) Push
     const pushResp = await sendPushMulticast({
-      title: subject,
-      body: emailBody,
+      title: pushTitle,
+      body: emailText, // texto coherente en ambos canales
       tokens: allTokens,
       data: {
         ...Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
@@ -311,11 +349,11 @@ if (!originAllowed(origin) && !isInternal(req)) {
       },
     });
 
-    // 4) Email
+    // --- 3) Email
     const emailResp = await sendEmailsWithSendGrid({
-      subject: subject,
+      subject: emailSubject,
       htmlBody,
-      textBody: emailBody,
+      textBody: emailText,
       toList: allEmails,
     });
 
