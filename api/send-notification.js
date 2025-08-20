@@ -1,4 +1,4 @@
- // /api/send-notification.js  (Vercel runtime "nodejs" – ESM)
+// /api/send-notification.js  (Vercel runtime "nodejs" – ESM)
 export const config = { runtime: "nodejs" };
 
 import admin from "firebase-admin";
@@ -138,8 +138,8 @@ function applyPlaceholders(str, data = {}) {
 async function loadTemplateDoc(templateId) {
   if (!db || !templateId) return null;
   const candidates = [
-    ["plantillas", templateId],            // colección actual que mostraste en screenshot
-    ["plantillas_mensajes", templateId],   // por compatibilidad con tu esquema anterior
+    ["plantillas", templateId],            // colección actual
+    ["plantillas_mensajes", templateId],   // compat
   ];
   for (const [col, id] of candidates) {
     try {
@@ -189,18 +189,24 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
     return { successCount: 0, failureCount: 0, invalidTokens: [] };
   }
 
-  // DEDUPE: garantizamos 1 solo envío por token
+  // DEDUPE: 1 solo envío por token
   const uniq = Array.from(new Set(tokens.map(t => (t || "").trim()).filter(Boolean)));
 
   const message = {
     tokens: uniq,
-    notification: { title, body },
+    notification: { title, body }, // FCM la muestra automáticamente
     webpush: {
       notification: { title, body, icon: PUSH_ICON_URL, badge: PUSH_BADGE_URL },
       fcmOptions: { link: PWA_URL }
     },
-    // ¡OJO!: data SIN title/body para no interferir con el SW
-    data: Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
+    // data incluye title/body/icon/badge: útil si alguna vez llega como data-only.
+    data: {
+      ...Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
+      title,
+      body,
+      icon: PUSH_ICON_URL,
+      badge: PUSH_BADGE_URL,
+    },
   };
 
   const resp = await messaging.sendEachForMulticast(message);
@@ -212,7 +218,7 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
     }
   });
 
-  // Limpieza opcional en Firestore (si db disponible y hay clienteIds en data)
+  // Limpieza opcional en Firestore (si hay clienteIds en data)
   if (invalid.length && db && Array.isArray(data.clienteIds)) {
     try {
       const batch = db.batch();
@@ -247,7 +253,7 @@ async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   }));
 
   let sent = 0, failed = 0; const errors = [];
-  // En bloques moderados (SG soporta batch)
+  // En bloques moderados
   const chunkSize = 500;
   for (let i=0; i<msgs.length; i+=chunkSize) {
     const batch = msgs.slice(i, i+chunkSize);
@@ -326,21 +332,21 @@ export default async function handler(req, res) {
       emailSubject = repl(candEmailSubject);
       const candEmailHtml = tpl.cuerpo_email || tpl.html_email;
       if (candEmailHtml) emailHtml = repl(candEmailHtml);
-      // si no hay HTML específico, el texto plano toma cuerpo genérico o de push
+      // Si no hay HTML específico, usamos texto plano de push o genérico
       emailText = repl(tpl.cuerpo_email ? (tpl.cuerpo || pushBody) : pushBody);
     } else {
-      // Sin plantilla: usar lo que vino en el payload como hasta ahora
+      // Sin plantilla: usar lo que vino en el payload
       emailSubject = pushTitle;
       emailText    = pushBody;
     }
 
-    // Si no vino HTML en plantilla, usamos el wrapper HTML existente
+    // Si no vino HTML en plantilla, usamos wrapper HTML
     const htmlBody = emailHtml || renderEmailHtml({ title: emailSubject, body: emailText, templateData });
 
     // --- 2) Push
     const pushResp = await sendPushMulticast({
       title: pushTitle,
-      body: emailText, // texto coherente en ambos canales
+      body: emailText, // alineado con emailText (placeholders ya aplicados)
       tokens: allTokens,
       data: {
         ...Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
