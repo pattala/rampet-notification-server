@@ -4,7 +4,7 @@ export const config = { runtime: "nodejs" };
 import admin from "firebase-admin";
 import sgMail from "@sendgrid/mail";
 
-/* ───────────────────── CORS ───────────────────── */
+/* ─────────────── CORS ─────────────── */
 function parseAllowedOrigins() {
   const raw = (process.env.CORS_ALLOWED_ORIGINS || "").trim();
   return raw ? raw.split(",").map(s => s.trim()).filter(Boolean) : [];
@@ -25,8 +25,7 @@ function setCors(res, origin) {
   );
   res.setHeader("Access-Control-Max-Age", "86400");
 }
-
-// Llamada interna server-to-server (con API secret) => permitir aunque no haya Origin
+// Llamada interna server-to-server (programar-lanzamiento -> send-notification)
 function isInternal(req) {
   const h = req.headers || {};
   const key  = (process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "").trim();
@@ -35,7 +34,7 @@ function isInternal(req) {
   return !!key && (auth === key || xKey === key);
 }
 
-/* ───────────────────── Firebase init ───────────────────── */
+/* ─────────────── Firebase ─────────────── */
 let messaging = null;
 let db = null;
 try {
@@ -62,19 +61,18 @@ try {
   console.error("[send-notification] Firebase init error:", e);
 }
 
-/* ───────────────────── Constantes ───────────────────── */
+/* ─────────────── Constantes ─────────────── */
 const API_SECRET = (process.env.API_SECRET_KEY || process.env.MI_API_SECRET || "").trim();
-
 const CLIENTS_COLLECTION = process.env.CLIENTS_COLLECTION || "clientes";
 const FCM_TOKENS_FIELD  = "fcmTokens";
 
 const PWA_URL       = process.env.PWA_URL || "https://rampet.vercel.app";
-const PUSH_ICON_URL = process.env.PUSH_ICON_URL || (PWA_URL + "/icon-192.png");
+const PUSH_ICON_URL = process.env.PUSH_ICON_URL || PWA_URL + "/icon-192.png";
 
 const SG_KEY  = (process.env.SENDGRID_API_KEY || "").trim();
 const SG_FROM = (process.env.SENDGRID_FROM_EMAIL || "").trim();
 
-/* ───────────────────── Utils ───────────────────── */
+/* ─────────────── Utils ─────────────── */
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (typeof req.body === "string") {
@@ -87,14 +85,13 @@ async function readJson(req) {
 }
 const isLikelyEmail = (s) =>
   typeof s === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
-
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
     .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
 }
 
-/* ───────────────────── Destinatarios ───────────────────── */
+/* ─────────────── Destinatarios ─────────────── */
 async function collectTokensFromClienteIds(clienteIds = []) {
   if (!db || !Array.isArray(clienteIds) || clienteIds.length === 0) return [];
   const set = new Set();
@@ -108,7 +105,6 @@ async function collectTokensFromClienteIds(clienteIds = []) {
   });
   return Array.from(set);
 }
-
 async function collectEmails({ emails = [], clienteIds = [] }) {
   const set = new Set();
   (emails || []).forEach(e => { if (isLikelyEmail(e)) set.add(e.trim()); });
@@ -128,28 +124,24 @@ async function collectEmails({ emails = [], clienteIds = [] }) {
   return Array.from(set);
 }
 
-/* ───────────────────── Plantillas ───────────────────── */
-// Reemplaza {placeholders} por datos de templateData
+/* ─────────────── Plantillas correo (campañas) ─────────────── */
 function applyPlaceholders(str, data = {}) {
   return String(str || "").replace(/\{(\w+)\}/g, (_, k) => String(data?.[k] ?? ""));
 }
-
 async function loadTemplateDoc(templateId) {
   if (!db || !templateId) return null;
   const candidates = [
-    ["plantillas", templateId],            // colección actual
-    ["plantillas_mensajes", templateId],   // compat
+    ["plantillas", templateId],
+    ["plantillas_mensajes", templateId],
   ];
   for (const [col, id] of candidates) {
     try {
       const doc = await db.collection(col).doc(id).get();
       if (doc.exists) return doc.data() || null;
-    } catch (e) { /* ignore */ }
+    } catch { /* noop */ }
   }
   return null;
 }
-
-/* ───────────────────── Email HTML fallback ───────────────────── */
 function renderEmailHtml({ title, body, templateData }) {
   const vig = (templateData?.vence_text || "").trim();
   const VIG_TXT = vig ? `Vigencia: ${vig}` : "";
@@ -182,24 +174,26 @@ function renderEmailHtml({ title, body, templateData }) {
 </html>`;
 }
 
-/* ───────────────────── Envíos ───────────────────── */
+/* ─────────────── Envío PUSH ─────────────── */
+// FIXES:
+// 1) Quitamos `badge` (no lo usás)
+// 2) NO mandamos title/body/icon en `data` (evita que el SW cree un 2° toast)
 async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
   if (!messaging || !Array.isArray(tokens) || tokens.length === 0) {
     return { successCount: 0, failureCount: 0, invalidTokens: [] };
   }
 
-  // DEDUPE: 1 solo envío por token
   const uniq = Array.from(new Set(tokens.map(t => (t || "").trim()).filter(Boolean)));
 
   const message = {
     tokens: uniq,
-    notification: { title, body }, // FCM la muestra automáticamente
+    notification: { title, body },
     webpush: {
-      notification: { title, body, icon: PUSH_ICON_URL }, // ← SIN badge
+      notification: { title, body, icon: PUSH_ICON_URL },
       fcmOptions: { link: PWA_URL }
     },
-    // data: SOLO metadatos; NO title/body/icon para no gatillar un segundo push en SW viejo
-    data: Object.fromEntries(Object.entries(data || {}).map(([k,v])=>[String(k), String(v ?? "")])),
+    // data solo con metadatos propios, sin title/body/icon
+    data: Object.fromEntries(Object.entries(data || {}).map(([k,v]) => [String(k), String(v ?? "")])),
   };
 
   const resp = await messaging.sendEachForMulticast(message);
@@ -211,7 +205,6 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
     }
   });
 
-  // Limpieza opcional en Firestore (si hay clienteIds en data)
   if (invalid.length && db && Array.isArray(data.clienteIds)) {
     try {
       const batch = db.batch();
@@ -232,6 +225,7 @@ async function sendPushMulticast({ title, body, tokens = [], data = {} }) {
   };
 }
 
+/* ─────────────── Envío EMAIL (campañas) ─────────────── */
 async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   if (!SG_KEY || !SG_FROM || !Array.isArray(toList) || toList.length === 0) {
     return { attempted: 0, sent: 0, failed: toList?.length || 0, skipped: true, errors: ["SendGrid no configurado o sin destinatarios"] };
@@ -246,7 +240,6 @@ async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   }));
 
   let sent = 0, failed = 0; const errors = [];
-  // En bloques moderados
   const chunkSize = 500;
   for (let i=0; i<msgs.length; i+=chunkSize) {
     const batch = msgs.slice(i, i+chunkSize);
@@ -261,7 +254,7 @@ async function sendEmailsWithSendGrid({ subject, htmlBody, textBody, toList }) {
   return { attempted: msgs.length, sent, failed, errors };
 }
 
-/* ───────────────────── Handler ───────────────────── */
+/* ─────────────── Handler ─────────────── */
 export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   setCors(res, origin);
@@ -274,14 +267,13 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
-  // Permitir llamadas internas (programar-lanzamiento -> send-notification) aunque no haya Origin
   if (!originAllowed(origin) && !isInternal(req)) {
     return res.status(403).json({ ok: false, error: "Origin not allowed" });
   }
 
   try {
     // Auth
-    const auth = (req.headers.authorization || "").trim(); // "Bearer X"
+    const auth = (req.headers.authorization || "").trim();
     const apiKey = (req.headers["x-api-key"] || req.headers["x-api-key".toLowerCase()] || "").trim();
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
     if (!API_SECRET || (token !== API_SECRET && apiKey !== API_SECRET)) {
@@ -297,14 +289,14 @@ export default async function handler(req, res) {
       data = {}
     } = await readJson(req);
 
-    // --- 0) Destinatarios
+    // Destinatarios
     const tokensFromIds = await collectTokensFromClienteIds(clienteIds);
     const allTokens = Array.from(new Set([...(tokens || []), ...tokensFromIds].map(t => (t || "").trim()).filter(Boolean)));
     const allEmails = await collectEmails({ emails, clienteIds });
 
-    // --- 1) Cargar plantilla (si existe) y preparar textos por canal
-    let pushTitle   = title || templateData?.titulo || "RAMPET";
-    let pushBody    = body  || templateData?.descripcion || "";
+    // Plantillas para campañas (correo)
+    let pushTitle    = title || templateData?.titulo || "RAMPET";
+    let pushBody     = body  || templateData?.descripcion || "";
     let emailSubject = pushTitle;
     let emailText    = pushBody;
     let emailHtml    = null;
@@ -313,26 +305,21 @@ export default async function handler(req, res) {
     if (tpl) {
       const repl = (s) => applyPlaceholders(s, { ...templateData, titulo: pushTitle, descripcion: pushBody });
 
-      // PUSH
       const candPushTitle = tpl.titulo_push || tpl.titulo;
       const candPushBody  = tpl.cuerpo_push || tpl.cuerpo;
       if (candPushTitle) pushTitle = repl(candPushTitle);
       if (candPushBody)  pushBody  = repl(candPushBody);
 
-      // EMAIL
       const candEmailSubject = tpl.titulo_email || tpl.titulo || pushTitle;
       emailSubject = repl(candEmailSubject);
       const candEmailHtml = tpl.cuerpo_email || tpl.html_email;
       if (candEmailHtml) emailHtml = repl(candEmailHtml);
       emailText = repl(tpl.cuerpo_email ? (tpl.cuerpo || pushBody) : pushBody);
-    } else {
-      emailSubject = pushTitle;
-      emailText    = pushBody;
     }
 
     const htmlBody = emailHtml || renderEmailHtml({ title: emailSubject, body: emailText, templateData });
 
-    // --- 2) Push
+    // PUSH (usa solo notification/webpush; sin title/body en data)
     const pushResp = await sendPushMulticast({
       title: pushTitle,
       body: emailText,
@@ -344,7 +331,7 @@ export default async function handler(req, res) {
       },
     });
 
-    // --- 3) Email
+    // EMAIL (solo campañas)
     const emailResp = await sendEmailsWithSendGrid({
       subject: emailSubject,
       htmlBody,
