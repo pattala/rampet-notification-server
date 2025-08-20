@@ -54,7 +54,7 @@ export default async function handler(req, res) {
   applyCors(req, res);
   if (handlePreflight(req, res)) return;
 
-  // Healthcheck
+  // Healthcheck opcional
   if (req.method === "GET") {
     return res.status(200).json({ ok: true, route: "api/delete-user" });
   }
