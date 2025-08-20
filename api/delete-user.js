@@ -1,4 +1,4 @@
-//api/delete-user.js
+// api/delete-user.js
 import admin from "firebase-admin";
 
 /* ---------- CORS helpers ---------- */
@@ -22,7 +22,7 @@ function handlePreflight(req, res) {
 }
 function ensureAuth(req) {
   const required = process.env.API_SECRET_KEY || "";
-  if (!required) return true; // si no definiste clave, no exige auth
+  if (!required) return true;
   const got = req.headers["x-api-key"] || req.headers["X-API-Key"];
   return got === required;
 }
