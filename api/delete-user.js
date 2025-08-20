@@ -1,107 +1,50 @@
-// RAMPET – delete-user (POST) con CORS/OPTIONS y API Key
-import * as admin from 'firebase-admin';
+// api/delete-user.js (Versión Final ESM)
 
-let adminApp = null;
+import admin from 'firebase-admin';
 
-function getAdmin() {
-  if (adminApp) return adminApp;
-  const raw = process.env.GOOGLE_CREDENTIALS_JSON;
-  if (!raw) throw new Error('GOOGLE_CREDENTIALS_JSON missing');
-  const creds = JSON.parse(raw);
-
-  // Evitar "already exists" en dev
-  if (!admin.apps.length) {
-    adminApp = admin.initializeApp({
-      credential: admin.credential.cert(creds)
-    });
-  } else {
-    adminApp = admin.app();
-  }
-  return adminApp;
+function initializeFirebaseAdmin() {
+    if (!admin.apps.length) {
+        const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+        });
+    }
+    return admin.firestore();
 }
-
-// -- CORS helpers -----------------------------------------------------------
-function parseOrigins(envVal) {
-  return (envVal || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-const ALLOWED = parseOrigins(process.env.CORS_ALLOWED_ORIGINS);
-
-function applyCors(req, res) {
-  const origin = req.headers.origin || '';
-  if (ALLOWED.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-}
-
-function isPreflight(req) {
-  return req.method === 'OPTIONS';
-}
-// --------------------------------------------------------------------------
 
 export default async function handler(req, res) {
-  try {
-    applyCors(req, res);
-
-    // Preflight
-    if (isPreflight(req)) {
-      return res.status(204).end();
+    if (req.method === 'OPTIONS') {
+        return res.status(204).send('');
     }
-
-    // Método permitido
     if (req.method !== 'POST') {
-      return res.status(405).json({ ok: false, error: 'Use POST' });
+        return res.status(405).json({ error: 'Método no permitido.' });
     }
 
-    // Auth por API key
-    const apiKey = req.headers['x-api-key'];
-    if (!apiKey || apiKey !== process.env.API_SECRET_KEY) {
-      return res.status(401).json({ ok: false, error: 'Unauthorized' });
-    }
-
-    // Body
-    let body = {};
+    const db = initializeFirebaseAdmin();
     try {
-      // Vercel ya parsea JSON, pero por si acaso:
-      body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    } catch {
-      return res.status(400).json({ ok: false, error: 'Invalid JSON body' });
+        const idToken = req.headers.authorization?.split('Bearer ')[1];
+        if (!idToken) return res.status(401).json({ error: 'No autorizado: Token no proporcionado.' });
+
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        if (!decodedToken.admin) return res.status(403).json({ error: 'No autorizado: El usuario no es administrador.' });
+
+        const { clienteId, authUID } = req.body;
+        if (!clienteId) return res.status(400).json({ error: 'Falta el ID del documento del cliente.' });
+
+        await db.collection('clientes').doc(clienteId).delete();
+        
+        if (authUID) {
+            try {
+                await admin.auth().deleteUser(authUID);
+            } catch (error) {
+                if (error.code !== 'auth/user-not-found') {
+                    console.error(`Error al eliminar usuario de Auth ${authUID}:`, error);
+                }
+            }
+        }
+        return res.status(200).json({ message: 'Cliente eliminado con éxito.' });
+    } catch (error) {
+        console.error('Error en API /delete-user:', error);
+        return res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
     }
-
-    const { docId, numeroSocio } = body;
-    if (!docId && !numeroSocio) {
-      return res.status(400).json({ ok: false, error: 'Falta docId o numeroSocio.' });
-    }
-
-    const db = getAdmin().firestore();
-
-    // Resolver docId por numeroSocio si hace falta
-    let targetDocId = docId;
-    if (!targetDocId && numeroSocio) {
-      const snap = await db.collection('clientes')
-        .where('numeroSocio', '==', Number(numeroSocio))
-        .limit(1)
-        .get();
-      if (snap.empty) {
-        return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
-      }
-      targetDocId = snap.docs[0].id;
-    }
-
-    // Borrar doc del cliente
-    await db.collection('clientes').doc(targetDocId).delete();
-
-    // Si más adelante guardás tokens en otra colección/subcolección, acá podés limpiarlos.
-
-    return res.status(200).json({ ok: true, deleted: targetDocId });
-  } catch (err) {
-    console.error('delete-user error', err);
-    return res.status(500).json({ ok: false, error: err?.message || 'Server error' });
-  }
 }
