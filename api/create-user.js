@@ -1,116 +1,213 @@
-// api/create-user.js (Versión Final ESM)
+// api/create-user.js
+// Alta de usuario (Auth + Firestore) con CORS + x-api-key + lectura de body segura.
+// Idempotente: si ya existe en Auth/Firestore, completa lo que falte y responde ok.
 
-import admin from 'firebase-admin';
+import admin from "firebase-admin";
 
-// --- Helpers ---
-function initializeFirebaseAdmin() {
-    if (!admin.apps.length) {
-        const serviceAccount = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-        });
-    }
-    return admin.firestore();
+// ---------- Firebase Admin ----------
+function initFirebaseAdmin() {
+  if (admin.apps.length) return;
+
+  const raw = process.env.GOOGLE_CREDENTIALS_JSON;
+  if (!raw) throw new Error("GOOGLE_CREDENTIALS_JSON missing");
+
+  let sa;
+  try { sa = JSON.parse(raw); }
+  catch { throw new Error("Invalid GOOGLE_CREDENTIALS_JSON (not valid JSON)"); }
+
+  admin.initializeApp({
+    credential: admin.credential.cert(sa),
+  });
 }
 
-function getDiasCaducidad(puntos, reglasCaducidad) {
-    if (!reglasCaducidad || reglasCaducidad.length === 0) return 90;
-    const regla = [...reglasCaducidad].sort((a, b) => b.minPuntos - a.minPuntos).find(r => puntos >= r.minPuntos);
-    if (!regla && reglasCaducidad.length > 0) return [...reglasCaducidad].sort((a, b) => a.minPuntos - b.minPuntos)[0].cadaDias;
-    return regla ? regla.cadaDias : 90;
+function getDb() {
+  initFirebaseAdmin();
+  return admin.firestore();
 }
 
-// --- Handler Principal ---
+// ---------- CORS ----------
+function getAllowedOrigin(req) {
+  const allowed = (process.env.CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+  const origin = req.headers.origin;
+  if (origin && allowed.includes(origin)) return origin;
+  return allowed[0] || "";
+}
+
+function setCors(res, origin) {
+  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS, GET");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
+}
+
+// ---------- Body seguro ----------
+async function readJsonBody(req) {
+  try {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks).toString("utf8");
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch {
+    const e = new Error("BAD_JSON");
+    e.code = "BAD_JSON";
+    throw e;
+  }
+}
+
+// ---------- Util ----------
+function nowTs() {
+  return admin.firestore.FieldValue.serverTimestamp();
+}
+
+// ---------- Handler ----------
 export default async function handler(req, res) {
-    if (req.method === 'OPTIONS') {
-        return res.status(204).send('');
+  const allowOrigin = getAllowedOrigin(req);
+  setCors(res, allowOrigin);
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      route: "/api/create-user",
+      corsOrigin: allowOrigin || null,
+      project: "sistema-fidelizacion",
+      tips: "POST con x-api-key y body { email, dni(password), nombre?, telefono?, numeroSocio?, docId? }",
+    });
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+  }
+
+  // API key
+  const clientKey = req.headers["x-api-key"];
+  if (!clientKey || clientKey !== process.env.API_SECRET_KEY) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  // Body
+  let payload = {};
+  try {
+    payload = await readJsonBody(req);
+  } catch (e) {
+    if (e.code === "BAD_JSON") {
+      return res.status(400).json({ ok: false, error: "Invalid JSON body" });
     }
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Método no permitido.' });
+    return res.status(400).json({ ok: false, error: "Invalid request body" });
+  }
+
+  try {
+    const db = getDb();
+
+    // Campos esperados
+    let {
+      email,           // obligatorio
+      dni,             // password por default
+      nombre,          // opcional
+      telefono,        // opcional
+      numeroSocio,     // opcional (si no llega, puede asignarse en el panel o con trigger)
+      docId            // opcional (si querés fijar el ID del doc)
+    } = payload || {};
+
+    // Validaciones mínimas
+    if (!email || !dni) {
+      return res.status(400).json({ ok: false, error: "Faltan campos obligatorios: email y dni" });
+    }
+    email = String(email).toLowerCase().trim();
+    dni = String(dni).trim();
+
+    if (dni.length < 6) {
+      return res.status(400).json({ ok: false, error: "El DNI/clave debe tener al menos 6 caracteres" });
     }
 
-    const db = initializeFirebaseAdmin();
+    // 1) Auth: crear usuario si no existe
+    initFirebaseAdmin();
+    let authUser = null;
+    let createdAuth = false;
+
     try {
-        const idToken = req.headers.authorization?.split('Bearer ')[1];
-        if (!idToken) return res.status(401).json({ error: 'No autorizado: Token no proporcionado.' });
-
-        const decodedToken = await admin.auth().verifyIdToken(idToken);
-        if (!decodedToken.admin) return res.status(403).json({ error: 'No autorizado: El usuario no es administrador.' });
-
-        const { dni, nombre, email, telefono, fechaNacimiento, fechaInscripcion, enviarBienvenida, bonoBienvenida } = req.body;
-        if (!dni || !nombre || !email) return res.status(400).json({ error: 'DNI, Nombre y Email son obligatorios.' });
-
-        // (El resto de la lógica de negocio se mantiene igual...)
-        const emailQuery = await db.collection('clientes').where('email', '==', email).limit(1).get();
-        if (!emailQuery.empty) return res.status(409).json({ error: `Conflicto: El email '${email}' ya está en uso.` });
-
-        const dniQuery = await db.collection('clientes').where('dni', '==', dni).limit(1).get();
-        if (!dniQuery.empty) return res.status(409).json({ error: `Conflicto: El DNI '${dni}' ya está en uso.` });
-
-        const userRecord = await admin.auth().createUser({ email: email, password: dni, displayName: nombre });
-        
-        const contadorRef = db.collection("configuracion").doc("contadores");
-        const clienteRef = db.collection('clientes').doc(userRecord.uid); // Usamos el UID de Auth como ID de documento
-        const nuevoNumeroSocio = await db.runTransaction(async (t) => {
-            const doc = await t.get(contadorRef);
-            const nuevoNum = (doc.data()?.ultimoNumeroSocio || 0) + 1;
-            t.set(contadorRef, { ultimoNumeroSocio: nuevoNum }, { merge: true });
-            return nuevoNum;
+      authUser = await admin.auth().getUserByEmail(email);
+    } catch {
+      // no existe → crear
+      try {
+        authUser = await admin.auth().createUser({
+          email,
+          password: dni,                 // clave por default = DNI
+          displayName: nombre || "",
+          phoneNumber: telefono ? `+54${telefono}`.replace(/\D/g, "") : undefined, // opcional: normaliza si querés
+          emailVerified: false,
+          disabled: false,
         });
-
-        const nuevoCliente = {
-            id: clienteRef.id, numeroSocio: nuevoNumeroSocio, authUID: userRecord.uid,
-            dni, nombre, email, telefono, fechaNacimiento, fechaInscripcion,
-            puntos: 0, saldoAcumulado: 0, totalGastado: 0, ultimaCompra: "",
-            historialPuntos: [], historialCanjes: [], fcmTokens: [],
-            terminosAceptados: true, passwordPersonalizada: false,
-        };
-
-        if (bonoBienvenida.activo && bonoBienvenida.puntos > 0) {
-            nuevoCliente.puntos += bonoBienvenida.puntos;
-            nuevoCliente.historialPuntos.push({
-                fechaObtencion: new Date().toISOString(),
-                puntosObtenidos: bonoBienvenida.puntos,
-                puntosDisponibles: bonoBienvenida.puntos,
-                origen: 'Bono de Bienvenida',
-                diasCaducidad: getDiasCaducidad(bonoBienvenida.puntos, [])
-            });
+        createdAuth = true;
+      } catch (e) {
+        // Si falla por formato de phone o cualquier otra razón, reintentar sin phone
+        if (telefono) {
+          authUser = await admin.auth().createUser({
+            email,
+            password: dni,
+            displayName: nombre || "",
+            emailVerified: false,
+            disabled: false,
+          });
+          createdAuth = true;
+        } else {
+          throw e;
         }
-
-        await clienteRef.set(nuevoCliente);
-
-        let emailEnviado = false;
-        if (enviarBienvenida) {
-            try {
-                const response = await fetch(`https://${req.headers.host}/api/send-email`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.API_SECRET_KEY}` },
-                    body: JSON.stringify({
-                        to: email,
-                        templateId: 'bienvenida',
-                        templateData: {
-                            nombre: nombre.split(' ')[0],
-                            numero_socio: nuevoNumeroSocio,
-                            puntos_ganados: nuevoCliente.puntos,
-                            creado_desde_panel: true
-                        }
-                    })
-                });
-                if (response.ok) emailEnviado = true;
-            } catch (e) { console.error("Fallo en fetch a send-email:", e); }
-        }
-
-        return res.status(201).json({
-            message: 'Cliente creado con éxito.',
-            numeroSocio: nuevoNumeroSocio,
-            emailEnviado: emailEnviado
-        });
-
-    } catch (error) {
-        console.error('Error en API /create-user:', error);
-        if (error.code === 'auth/email-already-exists') {
-            return res.status(409).json({ error: 'El email ya está registrado en autenticación.' });
-        }
-        return res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
+      }
     }
+
+    const authUID = authUser.uid;
+
+    // 2) Firestore: crear/actualizar doc cliente
+    const col = db.collection("clientes");
+
+    // Intentar encontrar doc existente por email
+    let fsDocSnap = await col.where("email", "==", email).limit(1).get();
+    let fsDocRef = null;
+    let createdFs = false;
+
+    if (!fsDocSnap.empty) {
+      fsDocRef = fsDocSnap.docs[0].ref;
+      // Actualización mínima para asegurar consistencia
+      await fsDocRef.set({
+        email,
+        nombre: nombre ?? admin.firestore.FieldValue.delete(),
+        telefono: telefono ?? admin.firestore.FieldValue.delete(),
+        numeroSocio: (numeroSocio != null) ? Number(numeroSocio) : admin.firestore.FieldValue.delete(),
+        authUID,
+        estado: "activo",
+        updatedAt: nowTs(),
+      }, { merge: true });
+    } else {
+      // Si recibimos docId, lo usamos; si no, dejamos que Firestore asigne
+      fsDocRef = docId ? col.doc(docId) : col.doc();
+      await fsDocRef.set({
+        email,
+        nombre: nombre || "",
+        telefono: telefono || "",
+        numeroSocio: (numeroSocio != null) ? Number(numeroSocio) : null,
+        authUID,
+        fcmTokens: [],
+        estado: "activo",
+        createdAt: nowTs(),
+        updatedAt: nowTs(),
+      });
+      createdFs = true;
+    }
+
+    return res.status(200).json({
+      ok: true,
+      auth: { uid: authUID, created: createdAuth },
+      firestore: { docId: fsDocRef.id, created: createdFs },
+    });
+
+  } catch (err) {
+    console.error("create-user error:", err);
+    return res.status(500).json({ ok: false, error: "Internal Server Error" });
+  }
 }
