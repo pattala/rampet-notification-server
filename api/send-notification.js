@@ -1,6 +1,5 @@
 // api/send-notification.js
 // Envío de notificaciones FCM en modo "data-only" (sin notification)
-// Compatible con Vercel (Node serverless) + Firebase Admin SDK (singleton)
 
 import admin from "firebase-admin";
 
@@ -13,22 +12,11 @@ function initFirebaseAdmin() {
     }
     let creds;
     try {
-      // Puede venir con saltos de línea escapados; normalizamos
-      const normalized = credsRaw.replace(/\n/g, "\\n");
-      creds = JSON.parse(credsRaw || "{}");
-      // Si el JSON ya vino “bien”, usamos credsRaw, sino intentamos normalized
-      if (!creds.client_email || !creds.private_key) {
-        creds = JSON.parse(
-          normalized
-            .replace(/\\n/g, "\n") // por si vino doble escapado
-        );
-      }
-    } catch (e) {
-      // Último intento: reemplazar \n a mano
+      creds = JSON.parse(credsRaw);
+    } catch {
       const fallback = credsRaw.replace(/\\n/g, "\n");
       creds = JSON.parse(fallback);
     }
-
     admin.initializeApp({
       credential: admin.credential.cert({
         projectId: creds.project_id,
@@ -44,10 +32,7 @@ function initFirebaseAdmin() {
 function parseAllowedOrigins() {
   const raw = (process.env.CORS_ALLOWED_ORIGINS || "").trim();
   if (!raw) return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 function applyCors(req, res) {
@@ -57,10 +42,7 @@ function applyCors(req, res) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, x-api-key, Authorization"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
 }
 
@@ -84,22 +66,12 @@ function asStringRecord(obj = {}) {
 export default async function handler(req, res) {
   applyCors(req, res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
-
+  if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") {
-    return res
-      .status(405)
-      .json({ ok: false, error: "Method not allowed. Use POST." });
+    return res.status(405).json({ ok: false, error: "Method not allowed. Use POST." });
   }
+  if (!ensureAuth(req)) return res.status(401).json({ ok: false, error: "Unauthorized." });
 
-  if (!ensureAuth(req)) {
-    return res.status(401).json({ ok: false, error: "Unauthorized." });
-  }
-
-  // Body esperado (modo texto directo):
-  // { title, body, tokens, click_action?, icon?, badge?, extraData? }
   let body;
   try {
     body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
@@ -118,26 +90,25 @@ export default async function handler(req, res) {
   } = body || {};
 
   if (!Array.isArray(tokens) || tokens.length === 0) {
-    return res
-      .status(400)
-      .json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
+    return res.status(400).json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
   }
 
-  // Construimos "data-only" (⚠️ FCM exige strings)
+  // ⚠️ FCM exige strings en data
   const data = asStringRecord({
-    title,
+    title: title,
     body: msgBody,
     click_action,
     icon: icon || process.env.PUSH_ICON_URL || "",
-    badge: badge || process.env.PUSH_BADGE_URL || "",
+    badge: badge || process.env.PUSH_BADGE_URL || "", // si no usás badge, queda vacío
     type: "simple",
-    ...extraData, // si mandás adicionales, también quedarán como string
+    ...extraData,
   });
 
-  const message = {
-    tokens,
-    data, // ❗️sin "notification", sin "webpush.notification"
-  };
+  const message = { tokens, data }; // ❗️sin notification/webpush.notification
+
+  // ——— LOG TEMPORAL PARA DEPURAR (podés quitarlo después) ———
+  console.log("FCM message about to send:", JSON.stringify(message));
+  // ———————————————————————————————————————————————————————————
 
   try {
     const adminApp = initFirebaseAdmin();
@@ -148,10 +119,7 @@ export default async function handler(req, res) {
     resp.responses.forEach((r, idx) => {
       if (!r.success) {
         const code = r.error?.errorInfo?.code || r.error?.code || "";
-        if (
-          code.includes("registration-token-not-registered") ||
-          code.includes("invalid-argument")
-        ) {
+        if (code.includes("registration-token-not-registered") || code.includes("invalid-argument")) {
           invalidTokens.push(tokens[idx]);
         }
       }
@@ -165,10 +133,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error("FCM send error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "FCM send error",
-      details: err?.message || String(err),
-    });
+    return res.status(500).json({ ok: false, error: "FCM send error", details: err?.message || String(err) });
   }
 }
