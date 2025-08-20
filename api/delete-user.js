@@ -1,6 +1,6 @@
 // api/delete-user.js
-// CORS + x-api-key + borrado de Firestore (doc completo) y purga opcional en Firebase Auth.
-// Versión defensiva: no usamos req.body (Vercel puede lanzar "Invalid JSON").
+// Purga total SIEMPRE: borra doc en Firestore y también usuario en Firebase Auth (si existe).
+// CORS robusto + x-api-key + lectura de body segura (sin req.body para evitar "Invalid JSON" en Vercel).
 
 import admin from "firebase-admin";
 
@@ -12,11 +12,8 @@ function initFirebaseAdmin() {
   if (!raw) throw new Error("GOOGLE_CREDENTIALS_JSON missing");
 
   let sa;
-  try {
-    sa = JSON.parse(raw);
-  } catch {
-    throw new Error("Invalid GOOGLE_CREDENTIALS_JSON (not valid JSON)");
-  }
+  try { sa = JSON.parse(raw); }
+  catch { throw new Error("Invalid GOOGLE_CREDENTIALS_JSON (not valid JSON)"); }
 
   admin.initializeApp({
     credential: admin.credential.cert(sa),
@@ -113,7 +110,7 @@ export default async function handler(req, res) {
       route: "/api/delete-user",
       corsOrigin: allowOrigin || null,
       project: "sistema-fidelizacion",
-      tips: "POST con x-api-key y body { docId | numeroSocio | authUID | email, deleteAuth? }",
+      tips: "POST con x-api-key y body { docId | numeroSocio | authUID | email } (purga total).",
     });
   }
 
@@ -141,7 +138,7 @@ export default async function handler(req, res) {
   try {
     const db = getDb();
 
-    const { docId, numeroSocio, authUID, email, deleteAuth } = payload || {};
+    const { docId, numeroSocio, authUID, email } = payload || {};
     if (!docId && !numeroSocio && !authUID && !email) {
       return res.status(400).json({
         ok: false,
@@ -149,52 +146,58 @@ export default async function handler(req, res) {
       });
     }
 
+    // 1) Resolver doc/cliente (si ya borraste antes, found puede venir null)
     const found = await findClienteDoc(db, { docId, numeroSocio, authUID, email });
-    if (!found) {
-      return res.status(404).json({ ok: false, error: "Cliente no encontrado" });
+
+    let deletedDocId = null;
+    let matchedBy = null;
+    let data = null;
+
+    if (found) {
+      deletedDocId = found.id;
+      data = found.data;
+      matchedBy = docId ? "docId" : authUID ? "authUID" : email ? "email" : "numeroSocio";
+
+      // 2) Borrar documento en Firestore (doc entero; tu historial está embebido)
+      await db.collection("clientes").doc(found.id).delete();
+    } else {
+      // Si no encontramos el doc, seguimos igual con Auth (idempotencia)
+      matchedBy = docId ? "docId" : authUID ? "authUID" : email ? "email" : "numeroSocio";
     }
 
-    const { id, data } = found;
+    // 3) Borrar usuario en Auth (si existe), siempre (purga total)
+    initFirebaseAdmin();
+    let uidToDelete = authUID || data?.authUID || null;
 
-    // 1) Borrar documento en Firestore (tu lógica actual)
-    await db.collection("clientes").doc(id).delete();
-
-    // 2) Purga opcional en Firebase Auth
-    let authDeletion = null;
-    if (deleteAuth === true) {
-      try {
-        initFirebaseAdmin();
-
-        // Prioridad: body.authUID -> data.authUID -> getUserByEmail
-        let uidToDelete = authUID || data?.authUID || null;
-
-        if (!uidToDelete) {
-          const emailToResolve = email || data?.email;
-          if (emailToResolve) {
-            try {
-              const user = await admin.auth().getUserByEmail(String(emailToResolve).toLowerCase());
-              uidToDelete = user.uid;
-            } catch {
-              // no existe en Auth por email -> seguimos sin romper
-            }
-          }
+    if (!uidToDelete) {
+      const emailToResolve = email || data?.email;
+      if (emailToResolve) {
+        try {
+          const user = await admin.auth().getUserByEmail(String(emailToResolve).toLowerCase());
+          uidToDelete = user.uid;
+        } catch {
+          // no existe por email -> seguimos sin romper
         }
-
-        if (uidToDelete) {
-          await admin.auth().deleteUser(uidToDelete);
-          authDeletion = { deleted: true, uid: uidToDelete };
-        } else {
-          authDeletion = { deleted: false, reason: "auth user not found" };
-        }
-      } catch (e) {
-        authDeletion = { deleted: false, error: e?.message || String(e) };
       }
+    }
+
+    let authDeletion = null;
+    if (uidToDelete) {
+      try {
+        await admin.auth().deleteUser(uidToDelete);
+        authDeletion = { deleted: true, uid: uidToDelete };
+      } catch (e) {
+        // no rompas la operación principal: reportá el fallo
+        authDeletion = { deleted: false, uid: uidToDelete, error: e?.message || String(e) };
+      }
+    } else {
+      authDeletion = { deleted: false, reason: "auth user not found" };
     }
 
     return res.status(200).json({
       ok: true,
-      deletedDocId: id,
-      matchedBy: docId ? "docId" : authUID ? "authUID" : email ? "email" : "numeroSocio",
+      deletedDocId,
+      matchedBy,
       authDeletion,
     });
   } catch (err) {
