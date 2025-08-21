@@ -1,99 +1,87 @@
-// /api/enviar-notificacion-campana.js  (ESM, QStash + FCM WebPush + SendGrid)
+// /api/enviar-notificacion-campana.js
+// QStash-ONLY (firma requerida) + FCM data-only + SendGrid
 import { verifySignature } from "@upstash/qstash/nextjs";
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 import sgMail from "@sendgrid/mail";
 
-// --- Init SendGrid ---
+// ---------- Init SendGrid ----------
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 }
 
-// --- Init Firebase Admin (ESM) ---
+// ---------- Init Firebase Admin ----------
 if (!getApps().length) {
-  const creds = process.env.GOOGLE_CREDENTIALS_JSON
-    ? JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON)
-    : null;
+  const credsRaw = process.env.GOOGLE_CREDENTIALS_JSON || "";
+  const creds = credsRaw ? JSON.parse(credsRaw) : null;
   initializeApp(creds ? { credential: cert(creds) } : {});
 }
-
 const db = getFirestore();
 const messaging = getMessaging();
 
-// Config opcional para íconos de push web
+// ---------- Config opcional ----------
 const PWA_URL   = process.env.PWA_URL || "https://rampet.vercel.app";
 const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo.png`;
 const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
 
-// --- Handler principal ---
+// ---------- Handler principal (NO CORS: QStash llama server->server) ----------
 async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Método no permitido" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Método no permitido" });
 
   try {
     const { campaignId, tipoNotificacion, destinatarios, templateId } =
       (typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}")) || {};
 
     if (!campaignId || !tipoNotificacion) {
-      return res.status(400).json({ error: "Faltan campaignId o tipoNotificacion." });
+      return res.status(400).json({ ok: false, error: "Faltan campaignId o tipoNotificacion." });
     }
 
-    await procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios, templateId });
-    return res.status(200).json({ ok: true, message: "Notificación procesada." });
+    const result = await procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios, templateId });
+    return res.status(200).json({ ok: true, ...result });
   } catch (err) {
-    console.error("Error enviando notificación de campaña:", err);
+    console.error("QStash campañas error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
 
-// Si usás Upstash QStash para invocar este endpoint, mantené el verifySignature:
+// Export con verificación de firma QStash
 export default verifySignature(handler);
-// Si lo vas a invocar directo (sin QStash), exportá así en su lugar:
-// export default handler;
 
 // --------------------------------------------------------------------
-// Lógica de envío
+// Lógica de envío (push data-only + emails HTML)
 // --------------------------------------------------------------------
 async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios, templateId }) {
   // 1) Campaña
-  const snap = await db.collection("campanas").doc(String(campaignId)).get();
-  if (!snap.exists) throw new Error(`Campaña ${campaignId} no encontrada`);
-  const campana = snap.data();
+  const campSnap = await db.collection("campanas").doc(String(campaignId)).get();
+  if (!campSnap.exists) throw new Error(`Campaña ${campaignId} no encontrada`);
+  const campana = campSnap.data();
 
   if (campana.estaActiva === false) {
-    console.log(`Campaña ${campaignId} deshabilitada. No se envía.`);
-    return;
+    return { skipped: true, reason: "Campaña deshabilitada" };
   }
 
-  // 2) Plantilla  (colección: "plantillas")
+  // 2) Plantilla
   const tplId = templateId || (tipoNotificacion === "lanzamiento" ? "campaña_nueva_push" : "recordatorio_campana");
   const tplSnap = await db.collection("plantillas").doc(tplId).get();
   if (!tplSnap.exists) throw new Error(`Plantilla ${tplId} no encontrada`);
   const plantilla = tplSnap.data();
 
-  // 3) Destinatarios (todos o grupo de prueba)
+  // 3) Destinatarios
   const all = await db.collection("clientes").where("numeroSocio", "!=", null).get();
-  const arr = all.docs.map(d => ({ id: d.id, ...d.data() })); // ← fix del “.d.data()”
-  let clientes;
+  const todos = all.docs.map(d => ({ id: d.id, ...d.data() }));
+
+  let clientes = todos;
   if (Array.isArray(destinatarios) && destinatarios.length) {
-    clientes = arr.filter(c => destinatarios.includes(String(c.numeroSocio)) || destinatarios.includes(c.email));
-  } else {
-    clientes = arr;
+    const set = new Set(destinatarios.map(String));
+    clientes = todos.filter(c => set.has(String(c.numeroSocio)) || set.has(String(c.email)));
   }
 
-  // Filtrar suscritos a algo (email o push)
-  const suscritos = clientes.filter(c => Boolean(c.email) || (Array.isArray(c.fcmTokens) && c.fcmTokens.length));
-  if (!suscritos.length) {
-    console.log("Sin destinatarios suscritos.");
-    return;
-  }
+  // (opcional) estado == 'activo'
+  // clientes = clientes.filter(c => (c.estado || 'activo') === 'activo');
 
-  // 4) Preparar textos (comunes)
+  // 4) Preparar textos
   const textoVigencia =
     campana.fechaFin && campana.fechaFin !== "2100-01-01"
       ? `Aprovechá antes del ${new Date(campana.fechaFin).toLocaleDateString("es-AR")}.`
@@ -107,47 +95,60 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
     .replace(/{fecha_inicio}/g, new Date(campana.fechaInicio).toLocaleDateString("es-AR"))
     .replace(/\[TEXTO_VIGENCIA\]/g, textoVigencia);
 
-  // 5) PUSH (WebPush con notification payload: visible con PWA cerrada)
-  const tokens = [...new Set(suscritos.flatMap(c => c.fcmTokens || []))]; // ← fix del “.new Set”
+  // 5) PUSH — data-only
+  const tokens = Array.from(new Set(clientes.flatMap(c => c.fcmTokens || [])));
+  let pushResp = null;
   if (tokens.length) {
-    // limpiar HTML para el cuerpo de push
+    // Limpieza de HTML para cuerpo del push
     const bodyPush = cuerpoBase.replace(/<[^>]*>?/gm, " ").replace(/{nombre}/g, "cliente").trim();
-    const msg = {
-      tokens,
-      data: {}, // opcional p/ deep link: { screen: 'campanas' }
-      webpush: {
-        notification: { title: subject, body: bodyPush, icon: ICON_URL, badge: BADGE_URL },
-        fcmOptions: { link: PWA_URL }
-      }
+
+    const data = {
+      title: subject,
+      body: bodyPush,
+      icon: ICON_URL,
+      url: `${PWA_URL}/notificaciones`,
+      tag: `camp-${campaignId}`
     };
-    const resp = await messaging.sendEachForMulticast(msg);
-    console.log(`Push enviados: OK=${resp.successCount} ERR=${resp.failureCount}`);
+
+    pushResp = await messaging.sendEachForMulticast({ tokens, data });
+    console.log(`Push data-only campañas: OK=${pushResp.successCount} ERR=${pushResp.failureCount}`);
   }
 
-  // 6) EMAILS (SendGrid)
-  const emails = [...new Set(suscritos.map(c => c.email).filter(Boolean))];
-  if (emails.length && process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL) {
+  // 6) EMAILS — SendGrid
+  let emailCount = 0;
+  if (process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL) {
+    const emails = Array.from(new Set(clientes.map(c => c.email).filter(Boolean)));
     const jobs = emails.map(async (email) => {
-      const cliente = suscritos.find(c => c.email === email);
-      const nombre = cliente?.nombre?.split(" ")[0] || "Cliente";
+      const cliente = clientes.find(c => c.email === email);
+      const nombre  = cliente?.nombre?.split(" ")[0] || "Cliente";
       const html = `
         <div style="font-family:Arial, sans-serif; line-height:1.6; color:#333; max-width:600px; margin:auto; border:1px solid #ddd; padding:20px;">
-          <img src="https://raw.githubusercontent.com/pattala/rampet-cliente-app/main/images/mi_logo.png" alt="Logo" style="width:150px; display:block; margin:0 auto 20px auto;">
+          <img src="${ICON_URL}" alt="Logo" style="width:150px; display:block; margin:0 auto 20px 0;">
           <h2 style="color:#0056b3;">${subject}</h2>
           <div>${cuerpoBase.replace(/{nombre}/g, nombre)}</div>
           <br><p>Atentamente,<br><strong>Club RAMPET</strong></p>
-        </div>`.trim();
+        </div>
+      `.trim();
       try {
-        await sgMail.send({ to: email, from: { email: process.env.SENDGRID_FROM_EMAIL, name: "Club RAMPET" }, subject, html });
+        await sgMail.send({
+          to: email,
+          from: { email: process.env.SENDGRID_FROM_EMAIL, name: "Club RAMPET" },
+          subject,
+          html
+        });
       } catch (e) {
-        console.error('SendGrid error ->', email, e?.response?.body || e);
+        console.error("SendGrid error ->", email, e?.response?.body || e);
       }
     });
-    await Promise.allSettled(jobs);
-    console.log(`Emails procesados: ${emails.length}`);
+    const results = await Promise.allSettled(jobs);
+    emailCount = results.length;
+    console.log(`Emails procesados: ${emailCount}`);
   } else {
-    if (!process.env.SENDGRID_API_KEY || !process.env.SENDGRID_FROM_EMAIL) {
-      console.log("SendGrid no configurado; se omiten emails.");
-    }
+    console.log("SendGrid no configurado; se omiten emails.");
   }
+
+  return {
+    push: pushResp ? { successCount: pushResp.successCount, failureCount: pushResp.failureCount } : null,
+    emails: emailCount
+  };
 }
