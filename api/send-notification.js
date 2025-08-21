@@ -7,13 +7,10 @@ import admin from "firebase-admin";
 function initFirebaseAdmin() {
   if (!admin.apps.length) {
     const credsRaw = process.env.GOOGLE_CREDENTIALS_JSON || "";
-    if (!credsRaw) {
-      throw new Error("Falta GOOGLE_CREDENTIALS_JSON en variables de entorno.");
-    }
+    if (!credsRaw) throw new Error("Falta GOOGLE_CREDENTIALS_JSON");
     let creds;
-    try {
-      creds = JSON.parse(credsRaw);
-    } catch {
+    try { creds = JSON.parse(credsRaw); }
+    catch {
       const fallback = credsRaw.replace(/\\n/g, "\n");
       creds = JSON.parse(fallback);
     }
@@ -28,13 +25,11 @@ function initFirebaseAdmin() {
   return admin;
 }
 
-// ---------- Utilidades ----------
+// ---------- CORS + Auth ----------
 function parseAllowedOrigins() {
   const raw = (process.env.CORS_ALLOWED_ORIGINS || "").trim();
-  if (!raw) return [];
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return raw ? raw.split(",").map(s => s.trim()).filter(Boolean) : [];
 }
-
 function applyCors(req, res) {
   const allowed = parseAllowedOrigins();
   const origin = req.headers.origin || "";
@@ -45,14 +40,14 @@ function applyCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
 }
-
 function ensureAuth(req) {
   const required = process.env.API_SECRET_KEY || "";
-  if (!required) return true; // si no definiste clave, no bloquea (no recomendado)
+  if (!required) return true;
   const got = req.headers["x-api-key"] || req.headers["X-API-Key"];
   return got === required;
 }
 
+// ---------- Utils ----------
 function asStringRecord(obj = {}) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -62,14 +57,11 @@ function asStringRecord(obj = {}) {
   return out;
 }
 
-// ---------- Handler principal ----------
+// ---------- Handler ----------
 export default async function handler(req, res) {
   applyCors(req, res);
-
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed. Use POST." });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed. Use POST." });
   if (!ensureAuth(req)) return res.status(401).json({ ok: false, error: "Unauthorized." });
 
   let body;
@@ -80,9 +72,11 @@ export default async function handler(req, res) {
   }
 
   const {
+    tokens = [],
+    data = {},            // preferido: ya viene armado
+    // compat inputs (opcional)
     title = "",
     body: msgBody = "",
-    tokens = [],
     click_action = "/mis-puntos",
     icon,
     badge,
@@ -93,22 +87,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
   }
 
-  // ⚠️ FCM exige strings en data
-  const data = asStringRecord({
+  // Normaliza data a strings (FCM exige strings)
+  const finalData = asStringRecord(Object.keys(data).length ? data : {
     title: title,
     body: msgBody,
-    click_action,
+    url: click_action,
     icon: icon || process.env.PUSH_ICON_URL || "",
-    badge: badge || process.env.PUSH_BADGE_URL || "", // si no usás badge, queda vacío
+    badge: badge || process.env.PUSH_BADGE_URL || "",
     type: "simple",
     ...extraData,
   });
 
-  const message = { tokens, data }; // ❗️sin notification/webpush.notification
-
-  // ——— LOG TEMPORAL PARA DEPURAR (podés quitarlo después) ———
-  console.log("FCM message about to send:", JSON.stringify(message));
-  // ———————————————————————————————————————————————————————————
+  const message = { tokens, data: finalData }; // ❗️data-only
 
   try {
     const adminApp = initFirebaseAdmin();
