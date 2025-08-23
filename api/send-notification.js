@@ -9,6 +9,12 @@
 
 import admin from "firebase-admin";
 
+await ref.set({
+  // ...
+  expireAt: admin.firestore.Timestamp.fromDate(
+    new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)  // 90 días
+),
+}, { merge: true });
 // ---------- Inicialización Firebase Admin (singleton) ----------
 function initFirebaseAdmin() {
   if (!admin.apps.length) {
