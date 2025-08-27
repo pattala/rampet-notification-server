@@ -25,7 +25,7 @@ const PWA_URL   = process.env.PWA_URL || "https://rampet.vercel.app";
 const ICON_URL  = process.env.PUSH_ICON_URL  || `${PWA_URL}/images/mi_logo.png`;
 const BADGE_URL = process.env.PUSH_BADGE_URL || ICON_URL;
 
-// ---------- Handler principal (NO CORS: QStash llama server->server) ----------
+// ---------- Handler principal (QStash firma requerida) ----------
 async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Método no permitido" });
@@ -46,11 +46,10 @@ async function handler(req, res) {
   }
 }
 
-// Export con verificación de firma QStash
 export default verifySignature(handler);
 
 // --------------------------------------------------------------------
-// Lógica de envío (push data-only + emails HTML)
+// Lógica de envío (push data-only + emails HTML + inbox campañas)
 // --------------------------------------------------------------------
 async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, destinatarios, templateId }) {
   // 1) Campaña
@@ -78,9 +77,6 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
     clientes = todos.filter(c => set.has(String(c.numeroSocio)) || set.has(String(c.email)));
   }
 
-  // (opcional) estado == 'activo'
-  // clientes = clientes.filter(c => (c.estado || 'activo') === 'activo');
-
   // 4) Preparar textos
   const textoVigencia =
     campana.fechaFin && campana.fechaFin !== "2100-01-01"
@@ -99,7 +95,6 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
   const tokens = Array.from(new Set(clientes.flatMap(c => c.fcmTokens || [])));
   let pushResp = null;
   if (tokens.length) {
-    // Limpieza de HTML para cuerpo del push
     const bodyPush = cuerpoBase.replace(/<[^>]*>?/gm, " ").replace(/{nombre}/g, "cliente").trim();
 
     const data = {
@@ -145,6 +140,32 @@ async function procesarNotificacionIndividual({ campaignId, tipoNotificacion, de
     console.log(`Emails procesados: ${emailCount}`);
   } else {
     console.log("SendGrid no configurado; se omiten emails.");
+  }
+
+  // 7) INBOX — crear entrada por campaña (campanita PWA)
+  try {
+    const now = new Date();
+    const batch = db.batch();
+    for (const c of clientes) {
+      const inboxRef = db
+        .collection('clientes')
+        .doc(String(c.id))
+        .collection('inbox')
+        .doc();
+      batch.set(inboxRef, {
+        title: subject,
+        body: cuerpoBase.replace(/<[^>]*>?/gm, ' ').trim(),
+        url: `${PWA_URL}/notificaciones`,
+        tag: `camp-${campaignId}`,
+        source: 'campania',
+        status: 'sent',
+        sentAt: now,
+        expireAt: campana.fechaFin && campana.fechaFin !== '2100-01-01' ? new Date(campana.fechaFin) : null
+      });
+    }
+    await batch.commit();
+  } catch (e) {
+    console.error('Error creando inbox de campañas:', e);
   }
 
   return {
