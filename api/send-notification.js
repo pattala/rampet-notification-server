@@ -217,7 +217,12 @@ export default async function handler(req, res) {
   try {
     const adminApp = initFirebaseAdmin();
     const resp = await adminApp.messaging().sendEachForMulticast(message);
-
+console.log('FCM per-token:', resp.responses.map((r,i)=>({
+  ok: r.success,
+  idx: i,
+  code: r.error?.code || r.error?.errorInfo?.code || null,
+  msg: r.error?.message || null
+})));
     // Tokens inválidos → sugerimos limpiar
     const invalidTokens = [];
     resp.responses.forEach((r, idx) => {
