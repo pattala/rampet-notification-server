@@ -1,5 +1,5 @@
 // /api/send-notification.js
-// Envío de notificaciones FCM en modo "data-only" + TRACKING "sent" por usuario.
+// Envío de notificaciones FCM con 'notification' + 'data' y TRACKING "sent" por usuario.
 //
 // Env vars requeridas (Vercel):
 // - GOOGLE_CREDENTIALS_JSON  (service account JSON completo)
@@ -68,14 +68,19 @@ function asStringRecord(obj = {}) {
 }
 
 // ---------- Helpers TRACKING ----------
-async function resolveDestinatarios({ db, tokens = [], audience }) {
+async function resolveDestinatarios({ db, tokens = [], audience, clienteId }) {
   // Preferimos audience.docIds si viene desde el Panel/Campañas
   let destinatarios = [];
   if (audience && Array.isArray(audience.docIds) && audience.docIds.length) {
     destinatarios = audience.docIds.map(id => ({ id }));
   }
 
-  // Si no hay audience, mapeamos token -> cliente por fcmTokens
+  // Caso directo "uno": si viene clienteId explícito
+  if (!destinatarios.length && clienteId) {
+    destinatarios.push({ id: clienteId });
+  }
+
+  // Si no hay audience ni clienteId, mapeamos token -> cliente por fcmTokens
   if (!destinatarios.length && Array.isArray(tokens)) {
     for (const tk of tokens) {
       const q = await db.collection("clientes")
@@ -97,8 +102,8 @@ async function createInboxSent({ db, clienteId, notifId, dataForDoc, token }) {
     body:   dataForDoc.body  || "",
     url:    dataForDoc.url   || "/notificaciones",
     tag:    dataForDoc.tag   || null,
-    source: "simple",             // en campañas: "campania"
-    campaignId: null,
+    source: dataForDoc.source || "simple",   // en campañas: "campania"
+    campaignId: dataForDoc.campaignId || null,
     token:  token || null,
     status: "sent",
     sentAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -129,24 +134,45 @@ export default async function handler(req, res) {
   }
 
   const {
+    // contrato base
     title = "",
     body: msgBody = "",
-    tokens = [],
+    tokens: tokensIn = [],
     click_action = "/mis-puntos",
     icon,
     badge,
     extraData = {},           // puede incluir { url, tag, ... }
-    audience                  // opcional: { docIds: [...] }
+    audience,                 // opcional: { docIds: [...] }
+    // extensiones
+    clienteId,                // cuando es "uno"
   } = body || {};
 
-  if (!Array.isArray(tokens) || tokens.length === 0) {
-    return res.status(400).json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
-  }
   if (!title || !msgBody) {
     return res.status(400).json({ ok: false, error: "Falta title/body." });
   }
 
   const db = getDb();
+
+  // ====== Resolver tokens ======
+  let tokens = Array.isArray(tokensIn) ? [...tokensIn] : [];
+  // Si no trajeron tokens pero trajeron clienteId, buscamos los del cliente
+  if ((!tokens || tokens.length === 0) && clienteId) {
+    try {
+      const snap = await db.collection("clientes").doc(String(clienteId)).get();
+      const data = snap.exists ? snap.data() : null;
+      const fromCliente = Array.isArray(data?.fcmTokens) ? data.fcmTokens : [];
+      tokens = fromCliente.filter(Boolean);
+    } catch (e) {
+      console.error("Error resolviendo tokens por clienteId:", e?.message || e);
+    }
+  }
+  // Normalizar + de-dup
+  tokens = (Array.isArray(tokens) ? tokens : []).map(String).filter(Boolean);
+  tokens = Array.from(new Set(tokens));
+
+  if (!tokens.length) {
+    return res.status(400).json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
+  }
 
   // ====== notifId (único para este envío) ======
   const notifId = db.collection("_ids").doc().id;
@@ -164,7 +190,26 @@ export default async function handler(req, res) {
     ...extraData, // ej: { tag: "...", url: "..." }
   });
 
-  const message = { tokens, data }; // ❗ data-only (sin notification/webpush.notification)
+  // ====== Mensaje FCM ======
+  const message = {
+    tokens,
+    // Agregamos bloque notification para forzar visualización en todos los estados
+    notification: {
+      title,
+      body: msgBody,
+      icon: data.icon || 'https://rampet.vercel.app/images/mi_logo_192.png',
+    },
+    data, // mantenemos data para el SW (postMessage, tracking, etc.)
+    webpush: {
+      fcmOptions: {
+        link: data.url || "/notificaciones", // abre la URL si no hay SW que intercepte
+      },
+      headers: {
+        // Opcional: mejorar entrega
+        TTL: "2419200" // 28 días
+      }
+    }
+  };
 
   // LOG (temporal)
   console.log("FCM message about to send:", JSON.stringify({ tokensCount: tokens.length, data }));
@@ -187,12 +232,14 @@ export default async function handler(req, res) {
     // Tracking "sent" en Firestore
     let createdInbox = 0;
     try {
-      const destinatarios = await resolveDestinatarios({ db, tokens, audience });
+      const destinatarios = await resolveDestinatarios({ db, tokens, audience, clienteId });
       const dataForDoc = {
         title: data.title,
         body:  data.body,
         url:   data.url || data.click_action || "/notificaciones",
-        tag:   data.tag || null
+        tag:   data.tag || null,
+        source: extraData?.source || "simple",
+        campaignId: extraData?.campaignId || null,
       };
       for (const d of destinatarios) {
         try {
