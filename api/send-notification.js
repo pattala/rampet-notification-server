@@ -257,14 +257,23 @@ export default async function handler(req, res) {
       console.error("resolve destinatarios error:", e?.message || e);
     }
 
-    return res.status(200).json({
-      ok: true,
-      notifId,
-      successCount: resp.successCount,
-      failureCount: resp.failureCount,
-      invalidTokens,
-      createdInbox
-    });
+    const perToken = resp.responses.map((r, i) => ({
+  index: i,
+  token: tokens[i],
+  success: r.success,
+  errorCode: r.error?.code || r.error?.errorInfo?.code || null,
+  errorMessage: r.error?.message || null,
+}));
+
+return res.status(200).json({
+  ok: true,
+  notifId,
+  successCount: resp.successCount,
+  failureCount: resp.failureCount,
+  invalidTokens,
+  createdInbox,
+  perToken   // <— NUEVO detalle por token
+});
   } catch (err) {
     console.error("FCM send error:", err);
     return res.status(500).json({ ok: false, error: "FCM send error", details: err?.message || String(err) });
