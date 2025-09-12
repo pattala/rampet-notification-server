@@ -1,5 +1,5 @@
 // /api/send-notification.js
-// Envío de notificaciones FCM con 'notification' + 'data' y TRACKING "sent" por usuario.
+// Envío de notificaciones FCM en modo "data-only" + TRACKING "sent" por usuario.
 //
 // Env vars requeridas (Vercel):
 // - GOOGLE_CREDENTIALS_JSON  (service account JSON completo)
@@ -141,7 +141,7 @@ export default async function handler(req, res) {
     click_action = "/mis-puntos",
     icon,
     badge,
-    extraData = {},           // puede incluir { url, tag, ... }
+    extraData = {},           // puede incluir { url, tag, source, campaignId, ... }
     audience,                 // opcional: { docIds: [...] }
     // extensiones
     clienteId,                // cuando es "uno"
@@ -159,8 +159,8 @@ export default async function handler(req, res) {
   if ((!tokens || tokens.length === 0) && clienteId) {
     try {
       const snap = await db.collection("clientes").doc(String(clienteId)).get();
-      const data = snap.exists ? snap.data() : null;
-      const fromCliente = Array.isArray(data?.fcmTokens) ? data.fcmTokens : [];
+      const dataC = snap.exists ? snap.data() : null;
+      const fromCliente = Array.isArray(dataC?.fcmTokens) ? dataC.fcmTokens : [];
       tokens = fromCliente.filter(Boolean);
     } catch (e) {
       console.error("Error resolviendo tokens por clienteId:", e?.message || e);
@@ -190,22 +190,18 @@ export default async function handler(req, res) {
     ...extraData, // ej: { tag: "...", url: "..." }
   });
 
-  // ====== Mensaje FCM ======
+  // ====== Mensaje FCM (DATA-ONLY) ======
+  // Importante: NO enviar "notification" aquí para evitar errores de validación ("icon" no es válido ahí).
   const message = {
     tokens,
-    // Agregamos bloque notification para forzar visualización en todos los estados
-    notification: {
-      title,
-      body: msgBody,
-      icon: data.icon || 'https://rampet.vercel.app/images/mi_logo_192.png',
-    },
-    data, // mantenemos data para el SW (postMessage, tracking, etc.)
+    data,
+    // Puedes mantener fcmOptions.link por si alguna plataforma lo usa como fallback;
+    // en data-only normalmente el SW muestra la notificación.
     webpush: {
       fcmOptions: {
-        link: data.url || "/notificaciones", // abre la URL si no hay SW que intercepte
+        link: data.url || "/notificaciones",
       },
       headers: {
-        // Opcional: mejorar entrega
         TTL: "2419200" // 28 días
       }
     }
@@ -217,12 +213,15 @@ export default async function handler(req, res) {
   try {
     const adminApp = initFirebaseAdmin();
     const resp = await adminApp.messaging().sendEachForMulticast(message);
-console.log('FCM per-token:', resp.responses.map((r,i)=>({
-  ok: r.success,
-  idx: i,
-  code: r.error?.code || r.error?.errorInfo?.code || null,
-  msg: r.error?.message || null
-})));
+
+    // Log por token (útil para depurar en Vercel)
+    console.log('FCM per-token:', resp.responses.map((r,i)=>({
+      ok: r.success,
+      idx: i,
+      code: r.error?.code || r.error?.errorInfo?.code || null,
+      msg: r.error?.message || null
+    })));
+
     // Tokens inválidos → sugerimos limpiar
     const invalidTokens = [];
     resp.responses.forEach((r, idx) => {
