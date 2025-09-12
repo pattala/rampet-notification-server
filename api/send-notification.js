@@ -210,28 +210,54 @@ export default async function handler(req, res) {
   // LOG (temporal)
   console.log("FCM message about to send:", JSON.stringify({ tokensCount: tokens.length, data }));
 
-  try {
+   try {
     const adminApp = initFirebaseAdmin();
     const resp = await adminApp.messaging().sendEachForMulticast(message);
 
-    // Log por token (útil para depurar en Vercel)
-    console.log('FCM per-token:', resp.responses.map((r,i)=>({
-      ok: r.success,
-      idx: i,
-      code: r.error?.code || r.error?.errorInfo?.code || null,
-      msg: r.error?.message || null
-    })));
+    const perToken = resp.responses.map((r, i) => ({
+      index: i,
+      token: tokens[i],
+      success: r.success,
+      errorCode: r.error?.code || r.error?.errorInfo?.code || null,
+      errorMessage: r.error?.message || null,
+    }));
+
+    console.log("FCM per-token:", perToken);
 
     // Tokens inválidos → sugerimos limpiar
     const invalidTokens = [];
     resp.responses.forEach((r, idx) => {
       if (!r.success) {
         const code = r.error?.errorInfo?.code || r.error?.code || "";
-        if (code.includes("registration-token-not-registered") || code.includes("invalid-argument")) {
+        if (
+          code.includes("registration-token-not-registered") ||
+          code.includes("invalid-argument")
+        ) {
           invalidTokens.push(tokens[idx]);
         }
       }
     });
+
+    // 🔥 NUEVO: limpieza automática de tokens inválidos en Firestore
+    if (invalidTokens.length) {
+      try {
+        const db = getDb();
+        const snap = await db.collection("clientes")
+          .where("fcmTokens", "array-contains-any", invalidTokens)
+          .get();
+
+        for (const doc of snap.docs) {
+          const data = doc.data();
+          const nuevos = (data.fcmTokens || []).filter(
+            (tk) => !invalidTokens.includes(tk)
+          );
+          await doc.ref.update({ fcmTokens: nuevos });
+          console.log(`🧹 Tokens inválidos eliminados de clientes/${doc.id}`);
+        }
+      } catch (cleanErr) {
+        console.error("Error limpiando tokens inválidos:", cleanErr);
+      }
+    }
 
     // Tracking "sent" en Firestore
     let createdInbox = 0;
@@ -257,23 +283,16 @@ export default async function handler(req, res) {
       console.error("resolve destinatarios error:", e?.message || e);
     }
 
-    const perToken = resp.responses.map((r, i) => ({
-  index: i,
-  token: tokens[i],
-  success: r.success,
-  errorCode: r.error?.code || r.error?.errorInfo?.code || null,
-  errorMessage: r.error?.message || null,
-}));
-
-return res.status(200).json({
-  ok: true,
-  notifId,
-  successCount: resp.successCount,
-  failureCount: resp.failureCount,
-  invalidTokens,
-  createdInbox,
-  perToken   // <— NUEVO detalle por token
-});
+    // === Respuesta final ===
+    return res.status(200).json({
+      ok: true,
+      notifId,
+      successCount: resp.successCount,
+      failureCount: resp.failureCount,
+      invalidTokens,
+      createdInbox,
+      perToken,   // detalle por token
+    });
   } catch (err) {
     console.error("FCM send error:", err);
     return res.status(500).json({ ok: false, error: "FCM send error", details: err?.message || String(err) });
