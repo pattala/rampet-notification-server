@@ -67,21 +67,49 @@ function asStringRecord(obj = {}) {
 }
 
 // ---------- Resolución de destinatarios ----------
+// Devuelve una lista de { id: clienteId, token } (uno por token).
 async function resolveDestinatarios({ db, tokens = [], audience, clienteId }) {
-  let destinatarios = [];
+  const out = [];
+
+  // Helper: trae tokens de una lista de docIds (en lotes de 10 por límite de IN)
+  async function fetchDocIds(docIds) {
+    const ids = docIds.map(String).filter(Boolean);
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      const snap = await db.collection("clientes")
+        .where(admin.firestore.FieldPath.documentId(), "in", batch)
+        .get();
+      snap.forEach(doc => {
+        const data = doc.data() || {};
+        const toks = Array.isArray(data.fcmTokens) ? data.fcmTokens : [];
+        toks.forEach(tk => {
+          const clean = String(tk || "").trim();
+          if (clean) out.push({ id: doc.id, token: clean });
+        });
+      });
+    }
+  }
 
   // 1) Audience explícito (campañas con docIds)
   if (audience && Array.isArray(audience.docIds) && audience.docIds.length) {
-    destinatarios = audience.docIds.map(id => ({ id }));
+    await fetchDocIds(audience.docIds);
   }
 
   // 2) Caso "uno"
-  if (!destinatarios.length && clienteId) {
-    destinatarios.push({ id: clienteId });
+  if (clienteId) {
+    const snap = await db.collection("clientes").doc(String(clienteId)).get();
+    if (snap.exists) {
+      const data = snap.data() || {};
+      const toks = Array.isArray(data.fcmTokens) ? data.fcmTokens : [];
+      toks.forEach(tk => {
+        const clean = String(tk || "").trim();
+        if (clean) out.push({ id: snap.id, token: clean });
+      });
+    }
   }
 
   // 3) Mapear token -> cliente (por fcmTokens)
-  if (!destinatarios.length && Array.isArray(tokens) && tokens.length) {
+  if (Array.isArray(tokens) && tokens.length) {
     for (const tkRaw of tokens) {
       const tk = String(tkRaw || "").trim();
       if (!tk) continue;
@@ -89,39 +117,42 @@ async function resolveDestinatarios({ db, tokens = [], audience, clienteId }) {
         .where("fcmTokens", "array-contains", tk)
         .limit(1).get();
       if (!q.empty) {
-        destinatarios.push({ id: q.docs[0].id, token: tk });
+        out.push({ id: q.docs[0].id, token: tk });
       } else {
         console.warn("⚠️ Token sin cliente asociado:", tk);
       }
     }
   }
 
-  // 4) De-dup por clienteId
+  // De-dup por combinación (clienteId + token)
   const seen = new Set();
-  return destinatarios.filter(d => {
-    if (seen.has(d.id)) return false;
-    seen.add(d.id);
+  return out.filter(d => {
+    const key = `${d.id}|${d.token}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 }
 
 // ---------- Tracking en Inbox ----------
+// Crea/mergea el doc en clientes/{clienteId}/inbox/{notifId}. Si viene token, lo guarda.
 async function createInboxSent({ db, clienteId, notifId, dataForDoc, token }) {
   const ref = db.collection("clientes").doc(clienteId).collection("inbox").doc(notifId);
-  await ref.set({
+  const base = {
     title:  dataForDoc.title || "",
     body:   dataForDoc.body  || "",
     url:    dataForDoc.url   || "/notificaciones",
     tag:    dataForDoc.tag   || null,
     source: dataForDoc.source || "simple",
     campaignId: dataForDoc.campaignId || null,
-    token:  token || null,
     status: "sent",
     sentAt: admin.firestore.FieldValue.serverTimestamp(),
     expireAt: admin.firestore.Timestamp.fromDate(
       new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)
     ),
-  }, { merge: true });
+  };
+  if (token) base.token = token; // no sobreescribimos con null
+  await ref.set(base, { merge: true });
   return ref.id;
 }
 
@@ -179,8 +210,8 @@ export default async function handler(req, res) {
     }
   }
 
-  if (!tokens.length) {
-    return res.status(400).json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
+  if (!tokens.length && !(audience && Array.isArray(audience.docIds) && audience.docIds.length)) {
+    return res.status(400).json({ ok: false, error: "Faltan tokens o audience.docIds." });
   }
 
   // ====== notifId (único para este envío) ======
@@ -200,9 +231,9 @@ export default async function handler(req, res) {
   });
 
   // ====== Mensaje FCM (DATA-ONLY) ======
-  // (El SW muestra la notificación; evitamos el bloque "notification" para no chocar con validaciones)
+  // El SW (firebase-messaging-sw.js) se encarga de mostrar la notificación.
   const message = {
-    tokens,
+    tokens: tokens, // si no hay tokens aquí, sendEachForMulticast ignora audience; por eso resolvemos abajo destinatarios para tracking
     data,
     webpush: {
       fcmOptions: { link: data.url || "/notificaciones" },
@@ -214,24 +245,26 @@ export default async function handler(req, res) {
 
   try {
     const adminApp = initFirebaseAdmin();
-    const resp = await adminApp.messaging().sendEachForMulticast(message);
+    const resp = tokens.length
+      ? await adminApp.messaging().sendEachForMulticast(message)
+      : { successCount: 0, failureCount: 0, responses: [] }; // si se usa sólo audience.docIds
 
-    const perToken = resp.responses.map((r, i) => ({
+    const perToken = (resp.responses || []).map((r, i) => ({
       index: i,
       token: tokens[i],
       success: r.success,
       errorCode: r.error?.code || r.error?.errorInfo?.code || null,
       errorMessage: r.error?.message || null,
     }));
-    console.log("FCM per-token:", perToken);
+    if (perToken.length) console.log("FCM per-token:", perToken);
 
     // Tokens inválidos → limpiar en Firestore
     const invalidTokens = [];
-    resp.responses.forEach((r, idx) => {
+    (resp.responses || []).forEach((r, idx) => {
       if (!r.success) {
         const code = r.error?.errorInfo?.code || r.error?.code || "";
         if (code.includes("registration-token-not-registered") || code.includes("invalid-argument")) {
-          invalidTokens.push(tokens[idx]);
+          if (tokens[idx]) invalidTokens.push(tokens[idx]);
         }
       }
     });
@@ -259,7 +292,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // Tracking "sent" en Firestore para TODOS los destinatarios resueltos
+    // ===== Tracking "sent" en Firestore =====
+    // Resolvemos destinatarios REALES (id + token) usando audience/tokens/clienteId
     let createdInbox = 0;
     try {
       const destinatarios = await resolveDestinatarios({ db, tokens, audience, clienteId });
@@ -274,12 +308,18 @@ export default async function handler(req, res) {
         campaignId: extraData?.campaignId || null,
       };
 
-      for (const d of destinatarios) {
+      // Queremos UN inbox por cliente, aunque tenga varios tokens → colapsamos por clienteId
+      const byClient = new Map();  // clienteId -> token (primero disponible)
+      destinatarios.forEach(d => {
+        if (!byClient.has(d.id)) byClient.set(d.id, d.token || null);
+      });
+
+      for (const [cid, anyToken] of byClient.entries()) {
         try {
-          await createInboxSent({ db, clienteId: d.id, notifId, dataForDoc, token: d.token });
+          await createInboxSent({ db, clienteId: cid, notifId, dataForDoc, token: anyToken });
           createdInbox++;
         } catch (e) {
-          console.error("inbox sent error", d, e?.message || e);
+          console.error("inbox sent error", { cid, anyToken }, e?.message || e);
         }
       }
     } catch (e) {
@@ -289,8 +329,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       notifId,
-      successCount: resp.successCount,
-      failureCount: resp.failureCount,
+      successCount: resp.successCount || 0,
+      failureCount: resp.failureCount || 0,
       invalidTokens,
       createdInbox,
       perToken, // detalle por token
