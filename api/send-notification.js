@@ -1,10 +1,10 @@
 // /api/send-notification.js
 // Envío de notificaciones FCM en modo "data-only" + TRACKING "sent" por usuario.
 //
-// Env vars requeridas (Vercel):
-// - GOOGLE_CREDENTIALS_JSON  (service account JSON completo)
-// - API_SECRET_KEY           (clave que compara con header x-api-key)
-// - CORS_ALLOWED_ORIGINS     (lista separada por coma, ej: "https://rampet.vercel.app,http://127.0.0.1:5500")
+// Env vars (Vercel):
+// - GOOGLE_CREDENTIALS_JSON
+// - API_SECRET_KEY
+// - CORS_ALLOWED_ORIGINS ("https://rampet.vercel.app,http://127.0.0.1:5500")
 // - (opcional) PUSH_ICON_URL, PUSH_BADGE_URL
 
 import admin from "firebase-admin";
@@ -19,7 +19,6 @@ function initFirebaseAdmin() {
     try {
       creds = JSON.parse(credsRaw);
     } catch {
-      // soporte por si viene con \n escapados
       const fallback = credsRaw.replace(/\\n/g, "\n");
       creds = JSON.parse(fallback);
     }
@@ -67,34 +66,46 @@ function asStringRecord(obj = {}) {
   return out;
 }
 
-// ---------- Helpers TRACKING ----------
+// ---------- Resolución de destinatarios ----------
 async function resolveDestinatarios({ db, tokens = [], audience, clienteId }) {
-  // Preferimos audience.docIds si viene desde el Panel/Campañas
   let destinatarios = [];
+
+  // 1) Audience explícito (campañas con docIds)
   if (audience && Array.isArray(audience.docIds) && audience.docIds.length) {
     destinatarios = audience.docIds.map(id => ({ id }));
   }
 
-  // Caso directo "uno": si viene clienteId explícito
+  // 2) Caso "uno"
   if (!destinatarios.length && clienteId) {
     destinatarios.push({ id: clienteId });
   }
 
-  // Si no hay audience ni clienteId, mapeamos token -> cliente por fcmTokens
-  if (!destinatarios.length && Array.isArray(tokens)) {
-    for (const tk of tokens) {
+  // 3) Mapear token -> cliente (por fcmTokens)
+  if (!destinatarios.length && Array.isArray(tokens) && tokens.length) {
+    for (const tkRaw of tokens) {
+      const tk = String(tkRaw || "").trim();
+      if (!tk) continue;
       const q = await db.collection("clientes")
         .where("fcmTokens", "array-contains", tk)
         .limit(1).get();
-      if (!q.empty) destinatarios.push({ id: q.docs[0].id, token: tk });
+      if (!q.empty) {
+        destinatarios.push({ id: q.docs[0].id, token: tk });
+      } else {
+        console.warn("⚠️ Token sin cliente asociado:", tk);
+      }
     }
   }
 
-  // De-dup
+  // 4) De-dup por clienteId
   const seen = new Set();
-  return destinatarios.filter(d => !seen.has(d.id) && seen.add(d.id));
+  return destinatarios.filter(d => {
+    if (seen.has(d.id)) return false;
+    seen.add(d.id);
+    return true;
+  });
 }
 
+// ---------- Tracking en Inbox ----------
 async function createInboxSent({ db, clienteId, notifId, dataForDoc, token }) {
   const ref = db.collection("clientes").doc(clienteId).collection("inbox").doc(notifId);
   await ref.set({
@@ -102,12 +113,11 @@ async function createInboxSent({ db, clienteId, notifId, dataForDoc, token }) {
     body:   dataForDoc.body  || "",
     url:    dataForDoc.url   || "/notificaciones",
     tag:    dataForDoc.tag   || null,
-    source: dataForDoc.source || "simple",   // en campañas: "campania"
+    source: dataForDoc.source || "simple",
     campaignId: dataForDoc.campaignId || null,
     token:  token || null,
     status: "sent",
     sentAt: admin.firestore.FieldValue.serverTimestamp(),
-    // TTL de 90 días para mantener la bandeja ligera
     expireAt: admin.firestore.Timestamp.fromDate(
       new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)
     ),
@@ -134,16 +144,14 @@ export default async function handler(req, res) {
   }
 
   const {
-    // contrato base
     title = "",
     body: msgBody = "",
     tokens: tokensIn = [],
     click_action = "/mis-puntos",
     icon,
     badge,
-    extraData = {},           // puede incluir { url, tag, source, campaignId, ... }
-    audience,                 // opcional: { docIds: [...] }
-    // extensiones
+    extraData = {},           // { url, tag, source, campaignId, ... }
+    audience,                 // { docIds: [...] }
     clienteId,                // cuando es "uno"
   } = body || {};
 
@@ -153,22 +161,23 @@ export default async function handler(req, res) {
 
   const db = getDb();
 
-  // ====== Resolver tokens ======
-  let tokens = Array.isArray(tokensIn) ? [...tokensIn] : [];
-  // Si no trajeron tokens pero trajeron clienteId, buscamos los del cliente
-  if ((!tokens || tokens.length === 0) && clienteId) {
+  // ====== Resolver tokens (entrada) ======
+  let tokens = (Array.isArray(tokensIn) ? tokensIn : [])
+    .map(t => String(t || "").trim())
+    .filter(Boolean);
+  tokens = Array.from(new Set(tokens));
+
+  // Si no trajeron tokens pero mandan clienteId → obtenemos los del cliente
+  if (!tokens.length && clienteId) {
     try {
       const snap = await db.collection("clientes").doc(String(clienteId)).get();
       const dataC = snap.exists ? snap.data() : null;
       const fromCliente = Array.isArray(dataC?.fcmTokens) ? dataC.fcmTokens : [];
-      tokens = fromCliente.filter(Boolean);
+      tokens = Array.from(new Set(fromCliente.map(t => String(t || "").trim()).filter(Boolean)));
     } catch (e) {
       console.error("Error resolviendo tokens por clienteId:", e?.message || e);
     }
   }
-  // Normalizar + de-dup
-  tokens = (Array.isArray(tokens) ? tokens : []).map(String).filter(Boolean);
-  tokens = Array.from(new Set(tokens));
 
   if (!tokens.length) {
     return res.status(400).json({ ok: false, error: "Faltan tokens (array con al menos 1 token)." });
@@ -177,40 +186,33 @@ export default async function handler(req, res) {
   // ====== notifId (único para este envío) ======
   const notifId = db.collection("_ids").doc().id;
 
-  // ====== DATA para FCM (siempre strings) con el id ======
+  // ====== DATA para FCM (strings) ======
   const data = asStringRecord({
     id: notifId,
     title,
     body: msgBody,
     click_action,
-    url: (extraData && extraData.url) ? extraData.url : click_action, // guardamos ambos por compat
+    url: (extraData && extraData.url) ? extraData.url : click_action,
     icon:  icon  || process.env.PUSH_ICON_URL  || "",
     badge: badge || process.env.PUSH_BADGE_URL || "",
     type: "simple",
-    ...extraData, // ej: { tag: "...", url: "..." }
+    ...extraData,
   });
 
   // ====== Mensaje FCM (DATA-ONLY) ======
-  // Importante: NO enviar "notification" aquí para evitar errores de validación ("icon" no es válido ahí).
+  // (El SW muestra la notificación; evitamos el bloque "notification" para no chocar con validaciones)
   const message = {
     tokens,
     data,
-    // Puedes mantener fcmOptions.link por si alguna plataforma lo usa como fallback;
-    // en data-only normalmente el SW muestra la notificación.
     webpush: {
-      fcmOptions: {
-        link: data.url || "/notificaciones",
-      },
-      headers: {
-        TTL: "2419200" // 28 días
-      }
+      fcmOptions: { link: data.url || "/notificaciones" },
+      headers: { TTL: "2419200" } // 28 días
     }
   };
 
-  // LOG (temporal)
   console.log("FCM message about to send:", JSON.stringify({ tokensCount: tokens.length, data }));
 
-   try {
+  try {
     const adminApp = initFirebaseAdmin();
     const resp = await adminApp.messaging().sendEachForMulticast(message);
 
@@ -221,48 +223,48 @@ export default async function handler(req, res) {
       errorCode: r.error?.code || r.error?.errorInfo?.code || null,
       errorMessage: r.error?.message || null,
     }));
-
     console.log("FCM per-token:", perToken);
 
-    // Tokens inválidos → sugerimos limpiar
+    // Tokens inválidos → limpiar en Firestore
     const invalidTokens = [];
     resp.responses.forEach((r, idx) => {
       if (!r.success) {
         const code = r.error?.errorInfo?.code || r.error?.code || "";
-        if (
-          code.includes("registration-token-not-registered") ||
-          code.includes("invalid-argument")
-        ) {
+        if (code.includes("registration-token-not-registered") || code.includes("invalid-argument")) {
           invalidTokens.push(tokens[idx]);
         }
       }
     });
 
-    // 🔥 NUEVO: limpieza automática de tokens inválidos en Firestore
     if (invalidTokens.length) {
       try {
-        const db = getDb();
-        const snap = await db.collection("clientes")
-          .where("fcmTokens", "array-contains-any", invalidTokens)
-          .get();
-
-        for (const doc of snap.docs) {
-          const data = doc.data();
-          const nuevos = (data.fcmTokens || []).filter(
-            (tk) => !invalidTokens.includes(tk)
-          );
-          await doc.ref.update({ fcmTokens: nuevos });
-          console.log(`🧹 Tokens inválidos eliminados de clientes/${doc.id}`);
+        // Firestore sólo permite hasta 10 en array-contains-any; troceamos por las dudas
+        const chunks = [];
+        for (let i = 0; i < invalidTokens.length; i += 10) {
+          chunks.push(invalidTokens.slice(i, i + 10));
+        }
+        for (const part of chunks) {
+          const snap = await db.collection("clientes")
+            .where("fcmTokens", "array-contains-any", part)
+            .get();
+          for (const doc of snap.docs) {
+            const d = doc.data();
+            const nuevos = (d.fcmTokens || []).filter(tk => !invalidTokens.includes(tk));
+            await doc.ref.update({ fcmTokens: nuevos });
+            console.log(`🧹 Tokens inválidos eliminados de clientes/${doc.id}`);
+          }
         }
       } catch (cleanErr) {
         console.error("Error limpiando tokens inválidos:", cleanErr);
       }
     }
 
-    // Tracking "sent" en Firestore
+    // Tracking "sent" en Firestore para TODOS los destinatarios resueltos
     let createdInbox = 0;
     try {
       const destinatarios = await resolveDestinatarios({ db, tokens, audience, clienteId });
+      console.log("🔍 Destinatarios resueltos:", destinatarios);
+
       const dataForDoc = {
         title: data.title,
         body:  data.body,
@@ -271,6 +273,7 @@ export default async function handler(req, res) {
         source: extraData?.source || "simple",
         campaignId: extraData?.campaignId || null,
       };
+
       for (const d of destinatarios) {
         try {
           await createInboxSent({ db, clienteId: d.id, notifId, dataForDoc, token: d.token });
@@ -283,7 +286,6 @@ export default async function handler(req, res) {
       console.error("resolve destinatarios error:", e?.message || e);
     }
 
-    // === Respuesta final ===
     return res.status(200).json({
       ok: true,
       notifId,
@@ -291,7 +293,7 @@ export default async function handler(req, res) {
       failureCount: resp.failureCount,
       invalidTokens,
       createdInbox,
-      perToken,   // detalle por token
+      perToken, // detalle por token
     });
   } catch (err) {
     console.error("FCM send error:", err);
