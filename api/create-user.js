@@ -1,6 +1,7 @@
 // api/create-user.js
 // Alta de usuario (Auth + Firestore) con CORS + x-api-key + lectura de body segura.
 // Idempotente: si ya existe en Auth/Firestore, completa lo que falte y responde ok.
+// ✨ Cambios: admite domicilio (opcional) => domicilio.status/addressLine/components + auditoría.
 
 import admin from "firebase-admin";
 
@@ -76,7 +77,7 @@ export default async function handler(req, res) {
       route: "/api/create-user",
       corsOrigin: allowOrigin || null,
       project: "sistema-fidelizacion",
-      tips: "POST con x-api-key y body { email, dni(password), nombre?, telefono?, numeroSocio?, docId? }",
+      tips: "POST con x-api-key y body { email, dni(password), nombre?, telefono?, numeroSocio?, fechaNacimiento?, fechaInscripcion?, domicilio? }",
     });
   }
 
@@ -104,14 +105,17 @@ export default async function handler(req, res) {
   try {
     const db = getDb();
 
-    // Campos esperados
+    // Campos esperados (algunos opcionales)
     let {
-      email,           // obligatorio
-      dni,             // password por default
-      nombre,          // opcional
-      telefono,        // opcional
-      numeroSocio,     // opcional (si no llega, puede asignarse en el panel o con trigger)
-      docId            // opcional (si querés fijar el ID del doc)
+      email,            // obligatorio
+      dni,              // password por default
+      nombre,           // opcional
+      telefono,         // opcional
+      numeroSocio,      // opcional
+      fechaNacimiento,  // opcional (yyyy-mm-dd)
+      fechaInscripcion, // opcional (yyyy-mm-dd)
+      domicilio,        // opcional: { status, addressLine?, components? }
+      docId             // opcional (fijar ID del doc)
     } = payload || {};
 
     // Validaciones mínimas
@@ -139,13 +143,13 @@ export default async function handler(req, res) {
           email,
           password: dni,                 // clave por default = DNI
           displayName: nombre || "",
-          phoneNumber: telefono ? `+54${telefono}`.replace(/\D/g, "") : undefined, // opcional: normaliza si querés
+          phoneNumber: telefono ? `+54${telefono}`.replace(/\D/g, "") : undefined, // opcional
           emailVerified: false,
           disabled: false,
         });
         createdAuth = true;
       } catch (e) {
-        // Si falla por formato de phone o cualquier otra razón, reintentar sin phone
+        // Reintentar sin phone si falló
         if (telefono) {
           authUser = await admin.auth().createUser({
             email,
@@ -167,36 +171,58 @@ export default async function handler(req, res) {
     const col = db.collection("clientes");
 
     // Intentar encontrar doc existente por email
-    let fsDocSnap = await col.where("email", "==", email).limit(1).get();
+    const fsDocSnap = await col.where("email", "==", email).limit(1).get();
     let fsDocRef = null;
     let createdFs = false;
 
+    // Helper: construir payload con campos opcionales
+    const buildFsPayload = (isNew) => {
+      const base = {
+        email,
+        nombre: isNew ? (nombre || "") : (nombre ?? admin.firestore.FieldValue.delete()),
+        telefono: isNew ? (telefono || "") : (telefono ?? admin.firestore.FieldValue.delete()),
+        numeroSocio: (numeroSocio != null)
+          ? Number(numeroSocio)
+          : (isNew ? null : admin.firestore.FieldValue.delete()),
+        authUID,
+        estado: "activo",
+      };
+
+      // campos de fecha opcionales (si vienen)
+      if (fechaNacimiento) base.fechaNacimiento = fechaNacimiento;
+      if (fechaInscripcion) base.fechaInscripcion = fechaInscripcion;
+
+      // domicilio opcional (status/partial/complete)
+      if (domicilio && domicilio.status) {
+        base.domicilio = {
+          status: domicilio.status,
+          addressLine: domicilio.addressLine || "",
+          components: domicilio.components || {},
+          updatedBy: "admin",
+          updatedAt: nowTs(),
+        };
+      }
+
+      if (isNew) {
+        base.fcmTokens = [];
+        base.createdAt = nowTs();
+        base.updatedAt = nowTs();
+      } else {
+        base.updatedAt = nowTs();
+      }
+      return base;
+    };
+
     if (!fsDocSnap.empty) {
+      // existe → merge
       fsDocRef = fsDocSnap.docs[0].ref;
-      // Actualización mínima para asegurar consistencia
-      await fsDocRef.set({
-        email,
-        nombre: nombre ?? admin.firestore.FieldValue.delete(),
-        telefono: telefono ?? admin.firestore.FieldValue.delete(),
-        numeroSocio: (numeroSocio != null) ? Number(numeroSocio) : admin.firestore.FieldValue.delete(),
-        authUID,
-        estado: "activo",
-        updatedAt: nowTs(),
-      }, { merge: true });
+      const fsPayload = buildFsPayload(false);
+      await fsDocRef.set(fsPayload, { merge: true });
     } else {
-      // Si recibimos docId, lo usamos; si no, dejamos que Firestore asigne
+      // nuevo → docId opcional
       fsDocRef = docId ? col.doc(docId) : col.doc();
-      await fsDocRef.set({
-        email,
-        nombre: nombre || "",
-        telefono: telefono || "",
-        numeroSocio: (numeroSocio != null) ? Number(numeroSocio) : null,
-        authUID,
-        fcmTokens: [],
-        estado: "activo",
-        createdAt: nowTs(),
-        updatedAt: nowTs(),
-      });
+      const newDoc = buildFsPayload(true);
+      await fsDocRef.set(newDoc);
       createdFs = true;
     }
 
