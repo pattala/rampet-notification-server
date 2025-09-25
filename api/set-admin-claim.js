@@ -1,4 +1,4 @@
-// /api/set-admin-claim.js (ESM)
+//  /api/set-admin-claim.js (ESM)
 import admin from 'firebase-admin';
 
 const MI_API_SECRET = process.env.API_SECRET_KEY || process.env.MI_API_SECRET || '';
