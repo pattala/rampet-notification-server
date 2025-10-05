@@ -1,8 +1,7 @@
 // api/create-user.js
 // Alta de usuario (Auth + Firestore) con CORS + x-api-key + body seguro.
-// Idempotente. Mantiene el contrato original (busca por email; si no hay, usa docId o crea ID).
-// Aditivo: dni/dni_norm, domicilio flexible.
-// SIMPLIFICACIÓN: T&C auto-aceptados SIEMPRE en este endpoint (el Panel es quien lo usa).
+// Idempotente. Mantiene contrato original (busca por email; si no hay, usa docId o crea ID).
+// Aditivo: dni/dni_norm, domicilio flexible. T&C aceptados (alta desde Panel).
 
 import admin from "firebase-admin";
 
@@ -21,23 +20,16 @@ function initFirebaseAdmin() {
     credential: admin.credential.cert(sa),
   });
 }
-
-function getDb() {
-  initFirebaseAdmin();
-  return admin.firestore();
-}
+function getDb() { initFirebaseAdmin(); return admin.firestore(); }
 
 // ---------- CORS ----------
 function getAllowedOrigin(req) {
   const allowed = (process.env.CORS_ALLOWED_ORIGINS || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
+    .split(",").map(s => s.trim()).filter(Boolean);
   const origin = req.headers.origin;
   if (origin && allowed.includes(origin)) return origin;
   return allowed[0] || "";
 }
-
 function setCors(res, origin) {
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
@@ -54,22 +46,16 @@ async function readJsonBody(req) {
     if (!raw) return {};
     return JSON.parse(raw);
   } catch {
-    const e = new Error("BAD_JSON");
-    e.code = "BAD_JSON";
-    throw e;
+    const e = new Error("BAD_JSON"); e.code = "BAD_JSON"; throw e;
   }
 }
 
 // ---------- Util ----------
-function nowTs() {
-  return admin.firestore.FieldValue.serverTimestamp();
-}
+function nowTs() { return admin.firestore.FieldValue.serverTimestamp(); }
 const toStr = v => (v == null ? "" : String(v).trim());
 
 function composeAddressLine(components = {}) {
-  const {
-    calle, numero, piso, depto, barrio, localidad, partido, provincia, cp, pais, addressLine
-  } = components || {};
+  const { calle, numero, piso, depto, barrio, localidad, partido, provincia, cp, pais, addressLine } = components || {};
   if (addressLine && String(addressLine).trim()) return String(addressLine).trim();
   const parts = [
     [calle, numero].filter(Boolean).join(" ").trim(),
@@ -89,20 +75,10 @@ export default async function handler(req, res) {
   setCors(res, allowOrigin);
 
   if (req.method === "OPTIONS") return res.status(204).end();
-
   if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      route: "/api/create-user",
-      corsOrigin: allowOrigin || null,
-      project: "sistema-fidelizacion",
-      tips: "POST con x-api-key y body { email, dni(password), nombre?, telefono?, numeroSocio?, fechaNacimiento?, fechaInscripcion?, domicilio? }",
-    });
+    return res.status(200).json({ ok: true, route: "/api/create-user", corsOrigin: allowOrigin || null });
   }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method Not Allowed" });
 
   // API key
   const clientKey = req.headers["x-api-key"];
@@ -112,92 +88,64 @@ export default async function handler(req, res) {
 
   // Body
   let payload = {};
-  try {
-    payload = await readJsonBody(req);
-  } catch (e) {
-    if (e.code === "BAD_JSON") {
-      return res.status(400).json({ ok: false, error: "Invalid JSON body" });
-    }
-    return res.status(400).json({ ok: false, error: "Invalid request body" });
+  try { payload = await readJsonBody(req); }
+  catch (e) {
+    return res.status(400).json({ ok: false, error: e?.code === "BAD_JSON" ? "Invalid JSON body" : "Invalid request body" });
   }
 
   try {
     const db = getDb();
 
-    // Campos esperados (algunos opcionales)
+    // Campos
     let {
-      email,            // obligatorio
-      dni,              // password por default
-      nombre,           // opcional
-      telefono,         // opcional
-      numeroSocio,      // opcional
-      fechaNacimiento,  // opcional (yyyy-mm-dd)
-      fechaInscripcion, // opcional (yyyy-mm-dd)
-      domicilio,        // opcional: { status, addressLine?, components? } | string
-      docId,            // opcional (fijar ID del doc)
-      // alias tolerados (string)
-      direccion,
-      address
+      email, dni, nombre, telefono,
+      numeroSocio, fechaNacimiento, fechaInscripcion,
+      domicilio, docId, direccion, address
     } = payload || {};
 
-    // Validaciones mínimas
-    if (!email || !dni) {
-      return res.status(400).json({ ok: false, error: "Faltan campos obligatorios: email y dni" });
-    }
+    if (!email || !dni) return res.status(400).json({ ok: false, error: "Faltan campos obligatorios: email y dni" });
     email = String(email).toLowerCase().trim();
     dni = toStr(dni);
-    if (dni.length < 6) {
-      return res.status(400).json({ ok: false, error: "El DNI/clave debe tener al menos 6 caracteres" });
-    }
+    if (dni.length < 6) return res.status(400).json({ ok: false, error: "El DNI/clave debe tener al menos 6 caracteres" });
 
-    // 1) Auth: crear usuario si no existe (idempotente)
+    // 1) Auth
     initFirebaseAdmin();
     let authUser = null;
     let createdAuth = false;
-
     try {
       authUser = await admin.auth().getUserByEmail(email);
     } catch {
-      // no existe → crear
       try {
         authUser = await admin.auth().createUser({
           email,
-          password: dni,                 // clave por default = DNI
+          password: dni,
           displayName: nombre || "",
-          phoneNumber: telefono ? `+54${telefono}`.replace(/\D/g, "") : undefined, // opcional
+          phoneNumber: telefono ? `+54${telefono}`.replace(/\D/g, "") : undefined,
           emailVerified: false,
           disabled: false,
         });
         createdAuth = true;
       } catch (e) {
-        // Reintentar sin phone si falló
         if (telefono) {
           authUser = await admin.auth().createUser({
-            email,
-            password: dni,
-            displayName: nombre || "",
-            emailVerified: false,
-            disabled: false,
+            email, password: dni, displayName: nombre || "",
+            emailVerified: false, disabled: false
           });
           createdAuth = true;
         } else {
-          console.error("create-user: Auth error:", e?.message || e);
           return res.status(500).json({ ok: false, error: "Auth creation failed" });
         }
       }
     }
-
     const authUID = authUser.uid;
 
-    // 2) Firestore: crear/actualizar doc cliente (MISMA LÓGICA ORIGINAL)
+    // 2) Firestore
     const col = db.collection("clientes");
-
-    // Intentar encontrar doc existente por email
     const fsDocSnap = await col.where("email", "==", email).limit(1).get();
     let fsDocRef = null;
     let createdFs = false;
 
-    // Resolver domicilio: objeto con/sin status, string, o alias direccion/address
+    // domicilio flexible
     let domicilioObj = null;
     if (domicilio && typeof domicilio === "object") {
       domicilioObj = {
@@ -209,51 +157,36 @@ export default async function handler(req, res) {
         const composed = composeAddressLine(domicilioObj.components);
         if (composed) domicilioObj.addressLine = composed;
       }
-      if (!domicilioObj.addressLine && !Object.keys(domicilioObj.components).length) {
-        domicilioObj = null;
-      }
+      if (!domicilioObj.addressLine && !Object.keys(domicilioObj.components).length) domicilioObj = null;
     } else if (typeof domicilio === "string" && domicilio.trim()) {
       domicilioObj = { status: "manual", addressLine: toStr(domicilio), components: {} };
     } else if ((direccion && toStr(direccion)) || (address && toStr(address))) {
       domicilioObj = { status: "manual", addressLine: toStr(direccion || address), components: {} };
     }
 
-    // 👉 T&C auto-aceptados (siempre, porque este endpoint lo usa el Panel)
-    // Intentamos leer la versión actual (opcional). Si no existe, dejamos null.
+    // leer versión T&C (opcional)
     let tycVersion = null;
     try {
       const cfg = await db.collection("configuracion").doc("principal").get();
       if (cfg.exists) tycVersion = cfg.get("tycVersion") || null;
     } catch {}
 
-    const tycBlock = {
-      accepted: true,
-      source: "panel",
-      acceptedAt: nowTs(),
-      ...(tycVersion ? { version: String(tycVersion) } : {})
-    };
+    const tycBlock = { accepted: true, source: "panel", acceptedAt: nowTs(), ...(tycVersion ? { version: String(tycVersion) } : {}) };
 
-    // Helper: construir payload con campos opcionales
     const buildFsPayload = (isNew) => {
       const base = {
         email,
         nombre: isNew ? (nombre || "") : (nombre ?? admin.firestore.FieldValue.delete()),
         telefono: isNew ? (telefono || "") : (telefono ?? admin.firestore.FieldValue.delete()),
-        numeroSocio: (numeroSocio != null)
-          ? Number(numeroSocio)
-          : (isNew ? null : admin.firestore.FieldValue.delete()),
+        numeroSocio: (numeroSocio != null) ? Number(numeroSocio) : (isNew ? null : admin.firestore.FieldValue.delete()),
         authUID,
         estado: "activo",
-        // persistir DNI
         dni,
         dni_norm: dni.replace(/\D+/g, ""),
-        // T&C marcados por defecto en este flujo
         tyc: tycBlock
       };
-
       if (fechaNacimiento) base.fechaNacimiento = fechaNacimiento;
       if (fechaInscripcion) base.fechaInscripcion = fechaInscripcion;
-
       if (domicilioObj) {
         base.domicilio = {
           status: domicilioObj.status,
@@ -263,27 +196,17 @@ export default async function handler(req, res) {
           updatedAt: nowTs(),
         };
       }
-
-      if (isNew) {
-        base.fcmTokens = [];
-        base.createdAt = nowTs();
-        base.updatedAt = nowTs();
-      } else {
-        base.updatedAt = nowTs();
-      }
+      if (isNew) { base.fcmTokens = []; base.createdAt = nowTs(); }
+      base.updatedAt = nowTs();
       return base;
     };
 
     if (!fsDocSnap.empty) {
-      // existe → merge
       fsDocRef = fsDocSnap.docs[0].ref;
-      const fsPayload = buildFsPayload(false);
-      await fsDocRef.set(fsPayload, { merge: true });
+      await fsDocRef.set(buildFsPayload(false), { merge: true });
     } else {
-      // nuevo → docId opcional (MISMA LÓGICA ORIGINAL)
       fsDocRef = docId ? col.doc(docId) : col.doc();
-      const newDoc = buildFsPayload(true);
-      await fsDocRef.set(newDoc);
+      await fsDocRef.set(buildFsPayload(true), { merge: false });
       createdFs = true;
     }
 
@@ -291,7 +214,6 @@ export default async function handler(req, res) {
       ok: true,
       auth: { uid: authUID, created: createdAuth },
       firestore: { docId: fsDocRef.id, created: createdFs },
-      tycApplied: true
     });
 
   } catch (err) {
