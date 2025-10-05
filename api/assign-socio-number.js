@@ -1,10 +1,8 @@
 // api/assign-socio-number.js
-// Asigna numeroSocio de forma consistente (transacción).
-// ✨ Envío de email de bienvenida SOLO si sendWelcome:true. Si no, no envía nada.
+// Asigna numeroSocio con transacción y SOLO envía bienvenida si sendWelcome:true.
 
 import admin from "firebase-admin";
 
-// ---------- Firebase Admin ----------
 function initFirebaseAdmin() {
   if (admin.apps.length) return;
   const raw = process.env.GOOGLE_CREDENTIALS_JSON;
@@ -16,7 +14,7 @@ function initFirebaseAdmin() {
 }
 function getDb() { initFirebaseAdmin(); return admin.firestore(); }
 
-// ---------- CORS ----------
+// CORS
 function getAllowedOrigin(req) {
   const allowed = (process.env.CORS_ALLOWED_ORIGINS || "")
     .split(",").map(s => s.trim()).filter(Boolean);
@@ -31,7 +29,7 @@ function setCors(res, origin) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
 }
 
-// ---------- Util ----------
+// Body
 async function readJsonBody(req) {
   const chunks = [];
   for await (const c of req) chunks.push(c);
@@ -40,13 +38,10 @@ async function readJsonBody(req) {
 }
 
 function buildBaseUrl(req) {
-  // Priorizar el host del request (funciona en Vercel)
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   const proto = (req.headers["x-forwarded-proto"] || "https").split(",")[0];
   if (host) return `${proto}://${host}`;
-  // Fallback a env si lo tenés configurado
-  if (process.env.SELF_BASE_URL) return process.env.SELF_BASE_URL;
-  return ""; // si queda vacío, evitamos llamar al send-email
+  return process.env.SELF_BASE_URL || "";
 }
 
 export default async function handler(req, res) {
@@ -54,20 +49,14 @@ export default async function handler(req, res) {
   setCors(res, allowOrigin);
 
   if (req.method === "OPTIONS") return res.status(204).end();
-
   if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      route: "/api/assign-socio-number",
-      corsOrigin: allowOrigin || null
-    });
+    return res.status(200).json({ ok: true, route: "/api/assign-socio-number", corsOrigin: allowOrigin || null });
   }
-
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  // Validación API key
+  // API key
   const clientKey = req.headers["x-api-key"];
   if (!clientKey || clientKey !== process.env.API_SECRET_KEY) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
@@ -87,20 +76,16 @@ export default async function handler(req, res) {
 
   try {
     const db = getDb();
-    let clienteRef = null;
+    let clienteRef;
 
     if (docId) {
       clienteRef = db.collection("clientes").doc(String(docId));
     } else {
-      // Buscar por authUID cuando llega uid
       const q = await db.collection("clientes").where("authUID", "==", String(uid)).limit(1).get();
-      if (q.empty) {
-        return res.status(404).json({ ok: false, error: "Cliente no encontrado por uid" });
-      }
+      if (q.empty) return res.status(404).json({ ok: false, error: "Cliente no encontrado por uid" });
       clienteRef = q.docs[0].ref;
     }
 
-    // Contador global (ajustá el ID si tu proyecto usa otro)
     const contadorRef = db.collection("configuracion").doc("contadorSocio");
 
     let numeroAsignado = null;
@@ -109,29 +94,33 @@ export default async function handler(req, res) {
       if (!cliSnap.exists) throw new Error("Cliente no existe");
 
       let ultimo = 0;
-      if (contSnap.exists && typeof contSnap.get("ultimoNumero") === "number") {
-        ultimo = contSnap.get("ultimoNumero");
-      }
+      if (contSnap.exists && typeof contSnap.get("ultimoNumero") === "number") ultimo = contSnap.get("ultimoNumero");
       numeroAsignado = ultimo + 1;
 
-      tx.set(contadorRef, { ultimoNumero: numeroAsignado, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      tx.set(clienteRef, { numeroSocio: numeroAsignado, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(contadorRef, {
+        ultimoNumero: numeroAsignado,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      tx.set(clienteRef, {
+        numeroSocio: numeroAsignado,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
     });
 
-    // ── Enviar bienvenida SOLO si el Panel lo pidió ──────────────────
+    // Enviar bienvenida SOLO si lo pidió el Panel
     let mail = { attempted: false, ok: false };
     if (sendWelcome === true) {
       mail.attempted = true;
       try {
         const baseUrl = buildBaseUrl(req);
-        if (!baseUrl) throw new Error("Base URL not resolved for send-email");
+        if (!baseUrl) throw new Error("Base URL not resolved");
 
-        // Obtener email y nombre del cliente para armar variables
         const cli = await clienteRef.get();
         const data = cli.data() || {};
         const to = data.email;
         const nombre = data.nombre || "";
-        // Llamar a tu propio endpoint de envío
+
         const resp = await fetch(`${baseUrl}/api/send-email`, {
           method: "POST",
           headers: {
@@ -144,11 +133,11 @@ export default async function handler(req, res) {
             variables: { nombre, numero_socio: numeroAsignado }
           })
         });
-        const j = await resp.json().catch(() => ({}));
-        mail.ok = resp.ok === true || resp.status >= 200 && resp.status < 300;
-        mail.response = j;
+        const jr = await resp.json().catch(() => ({}));
+        mail.ok = resp.ok || (resp.status >= 200 && resp.status < 300);
+        mail.response = jr;
       } catch (err) {
-        console.error("Error enviando email de bienvenida:", err);
+        console.error("send-welcome error:", err);
         mail.error = String(err?.message || err);
       }
     }
@@ -162,6 +151,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error("assign-socio-number error:", err);
-    return res.status(500).json({ ok: false, error: "Internal Server Error" });
+    return res.status(500).json({ ok: false, error: "Internal Server Error", detail: err?.message });
   }
 }
