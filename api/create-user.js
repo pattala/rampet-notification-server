@@ -1,30 +1,42 @@
 // api/create-user.js
-// Alta de usuario (Auth + Firestore) con CORS + x-api-key + body seguro.
-// Idempotente y compatible con el Panel: busca por email; si no existe, usa docId o nuevo ID.
-// Incluye: dni + dni_norm, domicilio objeto/string, compose addressLine si faltara.
+// Alta de usuario (Auth + Firestore) con CORS + x-api-key + lectura de body segura.
+// Idempotente: si ya existe en Auth/Firestore, completa lo que falte y responde ok.
+// ✨ Aditivo: persiste DNI (dni + dni_norm) y admite domicilio como objeto o string/alias (direccion/address).
 
 import admin from "firebase-admin";
 
 // ---------- Firebase Admin ----------
 function initFirebaseAdmin() {
   if (admin.apps.length) return;
+
   const raw = process.env.GOOGLE_CREDENTIALS_JSON;
   if (!raw) throw new Error("GOOGLE_CREDENTIALS_JSON missing");
+
   let sa;
   try { sa = JSON.parse(raw); }
   catch { throw new Error("Invalid GOOGLE_CREDENTIALS_JSON (not valid JSON)"); }
-  admin.initializeApp({ credential: admin.credential.cert(sa) });
+
+  admin.initializeApp({
+    credential: admin.credential.cert(sa),
+  });
 }
-function getDb() { initFirebaseAdmin(); return admin.firestore(); }
+
+function getDb() {
+  initFirebaseAdmin();
+  return admin.firestore();
+}
 
 // ---------- CORS ----------
 function getAllowedOrigin(req) {
   const allowed = (process.env.CORS_ALLOWED_ORIGINS || "")
-    .split(",").map(s => s.trim()).filter(Boolean);
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
   const origin = req.headers.origin;
   if (origin && allowed.includes(origin)) return origin;
   return allowed[0] || "";
 }
+
 function setCors(res, origin) {
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
@@ -41,12 +53,16 @@ async function readJsonBody(req) {
     if (!raw) return {};
     return JSON.parse(raw);
   } catch {
-    const e = new Error("BAD_JSON"); e.code = "BAD_JSON"; throw e;
+    const e = new Error("BAD_JSON");
+    e.code = "BAD_JSON";
+    throw e;
   }
 }
 
-// ---------- Utils ----------
-function nowTs() { return admin.firestore.FieldValue.serverTimestamp(); }
+// ---------- Util ----------
+function nowTs() {
+  return admin.firestore.FieldValue.serverTimestamp();
+}
 const toStr = v => (v == null ? "" : String(v).trim());
 
 function composeAddressLine(components = {}) {
@@ -64,18 +80,6 @@ function composeAddressLine(components = {}) {
     pais
   ].filter(Boolean);
   return parts.join(", ").replace(/\s+,/g, ",").replace(/,\s+,/g, ",");
-}
-
-function toE164AR(phoneLike) {
-  if (!phoneLike) return null;
-  const digits = String(phoneLike).replace(/\D+/g, "");
-  // Esperamos al menos 10-11 dígitos locales; prefijamos +54 si no tiene prefijo.
-  if (!digits) return null;
-  const withCC = digits.startsWith("54") ? digits : ("54" + digits);
-  const e164 = "+" + withCC;
-  // Firebase Auth requiere E.164 razonable (hasta ~15 dígitos)
-  if (e164.length < 10 || e164.length > 16) return null;
-  return e164;
 }
 
 // ---------- Handler ----------
@@ -119,19 +123,20 @@ export default async function handler(req, res) {
   try {
     const db = getDb();
 
-    // Campos (algunos opcionales)
+    // Campos esperados (algunos opcionales)
     let {
-      email,
-      dni,
-      nombre,
-      telefono,
-      numeroSocio,
-      fechaNacimiento,
-      fechaInscripcion,
-      domicilio,       // objeto {status,addressLine,components} o string
-      docId,           // opcional (para forzar ID)
-      direccion,       // string
-      address          // string
+      email,            // obligatorio
+      dni,              // password por default
+      nombre,           // opcional
+      telefono,         // opcional
+      numeroSocio,      // opcional
+      fechaNacimiento,  // opcional (yyyy-mm-dd)
+      fechaInscripcion, // opcional (yyyy-mm-dd)
+      domicilio,        // opcional: { status, addressLine?, components? } | string
+      docId,            // opcional (fijar ID del doc)
+      // alias tolerados (string)
+      direccion,
+      address
     } = payload || {};
 
     // Validaciones mínimas
@@ -144,7 +149,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "El DNI/clave debe tener al menos 6 caracteres" });
     }
 
-    // 1) Auth: crear usuario si no existe (si Auth falla, cortamos y NO tocamos Firestore)
+    // 1) Auth: crear usuario si no existe
     initFirebaseAdmin();
     let authUser = null;
     let createdAuth = false;
@@ -153,20 +158,19 @@ export default async function handler(req, res) {
       authUser = await admin.auth().getUserByEmail(email);
     } catch {
       // no existe → crear
-      const maybePhone = toE164AR(telefono);
       try {
         authUser = await admin.auth().createUser({
           email,
-          password: dni,                 // password inicial = DNI
+          password: dni,                 // clave por default = DNI
           displayName: nombre || "",
-          phoneNumber: maybePhone || undefined,
+          phoneNumber: telefono ? `+54${telefono}`.replace(/\D/g, "") : undefined, // opcional
           emailVerified: false,
           disabled: false,
         });
         createdAuth = true;
       } catch (e) {
-        // Reintentar sin phone si el formato lo trabó
-        if (maybePhone) {
+        // Reintentar sin phone si falló
+        if (telefono) {
           authUser = await admin.auth().createUser({
             email,
             password: dni,
@@ -176,39 +180,44 @@ export default async function handler(req, res) {
           });
           createdAuth = true;
         } else {
-          console.error("[create-user] Auth error:", e);
-          return res.status(500).json({ ok: false, error: "Auth creation failed", detail: e?.message });
+          console.error("create-user: Auth error:", e?.message || e);
+          throw e;
         }
       }
     }
 
     const authUID = authUser.uid;
 
-    // 2) Firestore: mismo contrato del Panel (doc por email si existe; sino docId || nuevo)
+    // 2) Firestore: crear/actualizar doc cliente (MISMA LÓGICA ORIGINAL)
     const col = db.collection("clientes");
+
+    // Intentar encontrar doc existente por email
     const fsDocSnap = await col.where("email", "==", email).limit(1).get();
     let fsDocRef = null;
     let createdFs = false;
 
-    // Resolver domicilio: objeto con/sin status, string o alias direccion/address
-    let domObj = null;
+    // Resolver domicilio: objeto con/sin status, string, o alias direccion/address
+    let domicilioObj = null;
     if (domicilio && typeof domicilio === "object") {
-      domObj = {
+      domicilioObj = {
         status: domicilio.status || "manual",
         addressLine: toStr(domicilio.addressLine || ""),
         components: domicilio.components || {},
       };
-      if (domObj.components && !domObj.addressLine) {
-        const composed = composeAddressLine(domObj.components);
-        if (composed) domObj.addressLine = composed;
+      if (domicilioObj.components && !domicilioObj.addressLine) {
+        const composed = composeAddressLine(domicilioObj.components);
+        if (composed) domicilioObj.addressLine = composed;
       }
-      if (!domObj.addressLine && !Object.keys(domObj.components).length) domObj = null;
+      if (!domicilioObj.addressLine && !Object.keys(domicilioObj.components).length) {
+        domicilioObj = null;
+      }
     } else if (typeof domicilio === "string" && domicilio.trim()) {
-      domObj = { status: "manual", addressLine: toStr(domicilio), components: {} };
+      domicilioObj = { status: "manual", addressLine: toStr(domicilio), components: {} };
     } else if ((direccion && toStr(direccion)) || (address && toStr(address))) {
-      domObj = { status: "manual", addressLine: toStr(direccion || address), components: {} };
+      domicilioObj = { status: "manual", addressLine: toStr(direccion || address), components: {} };
     }
 
+    // Helper: construir payload con campos opcionales
     const buildFsPayload = (isNew) => {
       const base = {
         email,
@@ -219,36 +228,46 @@ export default async function handler(req, res) {
           : (isNew ? null : admin.firestore.FieldValue.delete()),
         authUID,
         estado: "activo",
+        // NUEVO: persistir DNI
         dni,
         dni_norm: dni.replace(/\D+/g, ""),
-        updatedAt: nowTs(),
       };
-      if (fechaNacimiento)  base.fechaNacimiento  = fechaNacimiento;
+
+      // campos de fecha opcionales (si vienen)
+      if (fechaNacimiento) base.fechaNacimiento = fechaNacimiento;
       if (fechaInscripcion) base.fechaInscripcion = fechaInscripcion;
-      if (domObj) {
+
+      // domicilio opcional (status/partial/complete o manual)
+      if (domicilioObj) {
         base.domicilio = {
-          status: domObj.status,
-          addressLine: domObj.addressLine || "",
-          components: domObj.components || {},
+          status: domicilioObj.status,
+          addressLine: domicilioObj.addressLine || "",
+          components: domicilioObj.components || {},
           updatedBy: "admin",
           updatedAt: nowTs(),
         };
       }
+
       if (isNew) {
         base.fcmTokens = [];
         base.createdAt = nowTs();
+        base.updatedAt = nowTs();
+      } else {
+        base.updatedAt = nowTs();
       }
       return base;
     };
 
     if (!fsDocSnap.empty) {
-      // existe → merge al doc existente
+      // existe → merge
       fsDocRef = fsDocSnap.docs[0].ref;
-      await fsDocRef.set(buildFsPayload(false), { merge: true });
+      const fsPayload = buildFsPayload(false);
+      await fsDocRef.set(fsPayload, { merge: true });
     } else {
-      // nuevo → usa docId si vino; sino ID nuevo
+      // nuevo → docId opcional (MISMA LÓGICA ORIGINAL)
       fsDocRef = docId ? col.doc(docId) : col.doc();
-      await fsDocRef.set(buildFsPayload(true), { merge: false });
+      const newDoc = buildFsPayload(true);
+      await fsDocRef.set(newDoc);
       createdFs = true;
     }
 
@@ -260,6 +279,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error("create-user error:", err);
-    return res.status(500).json({ ok: false, error: "Internal Server Error", detail: err?.message });
+    return res.status(500).json({ ok: false, error: "Internal Server Error" });
   }
 }
