@@ -1,130 +1,143 @@
-// api/assign-socio-number.js
-// Asigna numeroSocio con transacción. Envía bienvenida SOLO si sendWelcome:true.
+ // /api/assign-socio-number.js  (ESM + CORS + asigna N° socio + email bienvenida)
+import admin from 'firebase-admin';
 
-import admin from "firebase-admin";
-
-// ---------- Firebase Admin ----------
-function initFirebaseAdmin() {
-  if (admin.apps.length) return;
-  const raw = process.env.GOOGLE_CREDENTIALS_JSON;
-  if (!raw) throw new Error("GOOGLE_CREDENTIALS_JSON missing");
-  let sa;
-  try { sa = JSON.parse(raw); }
-  catch { throw new Error("Invalid GOOGLE_CREDENTIALS_JSON"); }
-  admin.initializeApp({ credential: admin.credential.cert(sa) });
-}
-function getDb() { initFirebaseAdmin(); return admin.firestore(); }
-
-// ---------- CORS ----------
-function getAllowedOrigin(req) {
-  const allowed = (process.env.CORS_ALLOWED_ORIGINS || "")
-    .split(",").map(s => s.trim()).filter(Boolean);
-  const origin = req.headers.origin;
-  if (origin && allowed.includes(origin)) return origin;
-  return allowed[0] || "";
-}
-function setCors(res, origin) {
-  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS, GET");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
+// Inicializa Firebase Admin una sola vez
+if (!admin.apps.length) {
+  const creds = process.env.GOOGLE_CREDENTIALS_JSON;
+  if (creds) {
+    const serviceAccount = JSON.parse(creds);
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  } else {
+    // fallback si usás ADC (no recomendado para Vercel)
+    admin.initializeApp();
+  }
 }
 
-// ---------- Body seguro ----------
-async function readJsonBody(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
-}
+const db = admin.firestore();
 
-function buildBaseUrl(req) {
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  const proto = (req.headers["x-forwarded-proto"] || "https").split(",")[0];
-  return host ? `${proto}://${host}` : (process.env.PUBLIC_BASE_URL || "");
+// ---- CORS (eco del origin si está permitido) ----
+const ALLOWED = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function cors(req, res) {
+  const origin = req.headers.origin || '';
+  if (ALLOWED.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).end(); return true; }
+  return false;
 }
 
 export default async function handler(req, res) {
-  const allowOrigin = getAllowedOrigin(req);
-  setCors(res, allowOrigin);
+  if (cors(req, res)) return;
 
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method === "GET") return res.status(200).json({ ok: true, route: "/api/assign-socio-number" });
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method Not Allowed" });
-
-  // API key
-  const clientKey = req.headers["x-api-key"];
-  if (!clientKey || clientKey !== process.env.API_SECRET_KEY) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Método no permitido.' });
   }
 
-  let payload;
-  try { payload = await readJsonBody(req); }
-  catch { return res.status(400).json({ ok: false, error: "Invalid JSON body" }); }
-
-  const { docId, uid, sendWelcome } = payload || {};
-  if (!docId && !uid) return res.status(400).json({ ok: false, error: "Falta docId o uid" });
+  const { docId } = req.body || {};
+  if (!docId) {
+    return res.status(400).json({ error: 'Falta el ID del documento del cliente.' });
+  }
 
   try {
-    const db = getDb();
-    let clienteRef;
+    const contadorRef = db.collection('configuracion').doc('contadores');
+    const clienteRef = db.collection('clientes').doc(docId);
 
-    if (docId) {
-      clienteRef = db.collection("clientes").doc(String(docId));
-    } else {
-      const q = await db.collection("clientes").where("authUID", "==", String(uid)).limit(1).get();
-      if (q.empty) return res.status(404).json({ ok: false, error: "Cliente no encontrado por uid" });
-      clienteRef = q.docs[0].ref;
-    }
+    // Datos que vamos a usar para el email
+    let datosClienteParaEmail = null;
 
-    const contadorRef = db.collection("configuracion").doc("contadores");
-    let numeroAsignado = null;
+    // --- Transacción: asignar número de socio correlativo ---
     await db.runTransaction(async (tx) => {
-      const [contSnap, cliSnap] = await Promise.all([tx.get(contadorRef), tx.get(clienteRef)]);
-      if (!cliSnap.exists) throw new Error("Cliente no existe");
+      const [contadorDoc, clienteDoc] = await Promise.all([
+        tx.get(contadorRef),
+        tx.get(clienteRef),
+      ]);
 
-      const data = cliSnap.data();
-      if (data.numeroSocio) { numeroAsignado = data.numeroSocio; return; }
-
-      let ultimo = 0;
-      if (contSnap.exists && typeof contSnap.get("ultimoNumeroSocio") === "number") {
-        ultimo = contSnap.get("ultimoNumeroSocio");
+      if (!clienteDoc.exists) {
+        throw new Error('El documento del cliente no existe.');
       }
-      numeroAsignado = ultimo + 1;
 
-      tx.set(contadorRef, { ultimoNumeroSocio: numeroAsignado, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      tx.set(clienteRef, { numeroSocio: numeroAsignado, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      const clienteData = clienteDoc.data();
+
+      // Si ya tenía número, salimos (no reenviamos email)
+      if (clienteData.numeroSocio) {
+        console.log(`Cliente ${docId} ya tenía N° de Socio. Nada que hacer.`);
+        return;
+      }
+
+      // Datos base para el email (completamos N° abajo)
+      datosClienteParaEmail = {
+        id_cliente: docId,
+        nombre: clienteData.nombre,
+        email: clienteData.email,
+        puntos_ganados: clienteData.puntos || 0,
+      };
+
+      let nuevoNumeroSocio = 1;
+      if (contadorDoc.exists && contadorDoc.data().ultimoNumeroSocio) {
+        nuevoNumeroSocio = contadorDoc.data().ultimoNumeroSocio + 1;
+      }
+
+      // Actualizar contador y cliente
+      tx.set(contadorRef, { ultimoNumeroSocio: nuevoNumeroSocio }, { merge: true });
+      tx.update(clienteRef, { numeroSocio: nuevoNumeroSocio });
+
+      // Guardar N° para el email
+      datosClienteParaEmail.numero_socio = nuevoNumeroSocio;
+
+      console.log(`Asignado N° de Socio ${nuevoNumeroSocio} al cliente ${docId}`);
     });
 
-    // Email de bienvenida solo si se pide
-    let mail = { attempted: false, ok: false };
-    if (sendWelcome === true) {
-      mail.attempted = true;
-      try {
-        const baseUrl = buildBaseUrl(req);
-        const cliSnap = await clienteRef.get();
-        const cli = cliSnap.data() || {};
-        const resp = await fetch(`${baseUrl}/api/send-email`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": process.env.API_SECRET_KEY || "" },
-          body: JSON.stringify({
-            to: cli.email,
-            templateId: "bienvenida",
-            variables: { nombre: cli.nombre || "", numero_socio: numeroAsignado }
-          })
-        });
-        const jr = await resp.json().catch(() => ({}));
-        mail.ok = resp.ok;
-        mail.response = jr;
-      } catch (e) {
-        mail.error = String(e?.message || e);
-      }
+    // Si no hubo cambios (ya tenía N°), devolvemos OK
+    if (!datosClienteParaEmail) {
+      return res.status(200).json({ message: 'El cliente ya tenía número de socio. No se envió email.' });
     }
 
-    return res.status(200).json({ ok: true, message: "Número de socio asignado.", numeroSocio: numeroAsignado, mail });
+    // --- Enviar email de bienvenida (server → server) ---
+    try {
+     const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
+const r = await fetch(`${baseUrl}/api/send-email`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${process.env.API_SECRET_KEY}` // <- nombre correcto
+  },
+  body: JSON.stringify({
+    to: datosClienteParaEmail.email,
+    templateId: 'bienvenida',
+    templateData: {
+      nombre: datosClienteParaEmail.nombre,
+      numero_socio: datosClienteParaEmail.numero_socio,
+      puntos_ganados: datosClienteParaEmail.puntos_ganados,
+      id_cliente: datosClienteParaEmail.id_cliente,
+    }
+  })
+});
 
-  } catch (err) {
-    console.error("assign-socio-number error:", err);
-    return res.status(500).json({ ok: false, error: "Internal Server Error" });
+
+      const mailResp = await r.json().catch(() => ({}));
+      return res.status(200).json({
+        message: 'Número de socio asignado y email de bienvenida enviado (o encolado).',
+        numeroSocio: datosClienteParaEmail.numero_socio,
+        mail: mailResp
+      });
+    } catch (err) {
+      console.error('Error enviando email de bienvenida:', err);
+      return res.status(200).json({
+        message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
+        numeroSocio: datosClienteParaEmail.numero_socio,
+        mail: { error: 'send-email failed' }
+      });
+    }
+
+  } catch (error) {
+    console.error('Error asignando número de socio:', error);
+    return res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
   }
 }
