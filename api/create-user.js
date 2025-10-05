@@ -1,7 +1,8 @@
 // api/create-user.js
 // Alta de usuario (Auth + Firestore) con CORS + x-api-key + body seguro.
 // Idempotente. Mantiene el contrato original (busca por email; si no hay, usa docId o crea ID).
-// Aditivo: dni/dni_norm, domicilio flexible, y AHORA: T&C auto-aceptados solo si el alta viene del Panel.
+// Aditivo: dni/dni_norm, domicilio flexible.
+// SIMPLIFICACIÓN: T&C auto-aceptados SIEMPRE en este endpoint (el Panel es quien lo usa).
 
 import admin from "firebase-admin";
 
@@ -41,7 +42,7 @@ function setCors(res, origin) {
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS, GET");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization, x-client-app");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
 }
 
 // ---------- Body seguro ----------
@@ -149,12 +150,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "El DNI/clave debe tener al menos 6 caracteres" });
     }
 
-    // ¿Viene del Panel? (sin tocar el Panel)
-    const PANEL_ORIGIN = (process.env.PANEL_ADMIN_ORIGIN || "").trim();
-    const isFromPanel =
-      (PANEL_ORIGIN && allowOrigin === PANEL_ORIGIN) ||
-      (String(req.headers["x-client-app"] || "").toLowerCase() === "panel");
-
     // 1) Auth: crear usuario si no existe (idempotente)
     initFirebaseAdmin();
     let authUser = null;
@@ -186,14 +181,15 @@ export default async function handler(req, res) {
           });
           createdAuth = true;
         } else {
-          throw e;
+          console.error("create-user: Auth error:", e?.message || e);
+          return res.status(500).json({ ok: false, error: "Auth creation failed" });
         }
       }
     }
 
     const authUID = authUser.uid;
 
-    // 2) Firestore: crear/actualizar doc cliente (misma lógica original)
+    // 2) Firestore: crear/actualizar doc cliente (MISMA LÓGICA ORIGINAL)
     const col = db.collection("clientes");
 
     // Intentar encontrar doc existente por email
@@ -222,8 +218,23 @@ export default async function handler(req, res) {
       domicilioObj = { status: "manual", addressLine: toStr(direccion || address), components: {} };
     }
 
+    // 👉 T&C auto-aceptados (siempre, porque este endpoint lo usa el Panel)
+    // Intentamos leer la versión actual (opcional). Si no existe, dejamos null.
+    let tycVersion = null;
+    try {
+      const cfg = await db.collection("configuracion").doc("principal").get();
+      if (cfg.exists) tycVersion = cfg.get("tycVersion") || null;
+    } catch {}
+
+    const tycBlock = {
+      accepted: true,
+      source: "panel",
+      acceptedAt: nowTs(),
+      ...(tycVersion ? { version: String(tycVersion) } : {})
+    };
+
     // Helper: construir payload con campos opcionales
-    const buildFsPayload = (isNew, tycBlock) => {
+    const buildFsPayload = (isNew) => {
       const base = {
         email,
         nombre: isNew ? (nombre || "") : (nombre ?? admin.firestore.FieldValue.delete()),
@@ -236,6 +247,8 @@ export default async function handler(req, res) {
         // persistir DNI
         dni,
         dni_norm: dni.replace(/\D+/g, ""),
+        // T&C marcados por defecto en este flujo
+        tyc: tycBlock
       };
 
       if (fechaNacimiento) base.fechaNacimiento = fechaNacimiento;
@@ -251,11 +264,6 @@ export default async function handler(req, res) {
         };
       }
 
-      // 👉 T&C auto-aceptados SÓLO si viene del Panel y si el cliente NO tenía ya T&C aceptados
-      if (tycBlock) {
-        base.tyc = tycBlock;
-      }
-
       if (isNew) {
         base.fcmTokens = [];
         base.createdAt = nowTs();
@@ -266,43 +274,15 @@ export default async function handler(req, res) {
       return base;
     };
 
-    // Si existe doc, vemos si ya tenía T&C aceptados para no pisar
-    let tycBlock = null;
     if (!fsDocSnap.empty) {
       // existe → merge
       fsDocRef = fsDocSnap.docs[0].ref;
-      const current = fsDocSnap.docs[0].data() || {};
-      const alreadyAccepted = !!(current.tyc && current.tyc.accepted === true);
-
-      if (isFromPanel && !alreadyAccepted) {
-        // leer version actual (opcional)
-        let tycVersion = null;
-        try {
-          const cfg = await db.collection("configuracion").doc("principal").get();
-          if (cfg.exists) tycVersion = cfg.get("tycVersion") || null;
-        } catch {}
-        tycBlock = { accepted: true, source: "panel", acceptedAt: nowTs() };
-        if (tycVersion) tycBlock.version = String(tycVersion);
-      }
-
-      const fsPayload = buildFsPayload(false, tycBlock);
+      const fsPayload = buildFsPayload(false);
       await fsDocRef.set(fsPayload, { merge: true });
     } else {
-      // nuevo → docId opcional
+      // nuevo → docId opcional (MISMA LÓGICA ORIGINAL)
       fsDocRef = docId ? col.doc(docId) : col.doc();
-
-      if (isFromPanel) {
-        // leer version actual (opcional)
-        let tycVersion = null;
-        try {
-          const cfg = await db.collection("configuracion").doc("principal").get();
-          if (cfg.exists) tycVersion = cfg.get("tycVersion") || null;
-        } catch {}
-        tycBlock = { accepted: true, source: "panel", acceptedAt: nowTs() };
-        if (tycVersion) tycBlock.version = String(tycVersion);
-      }
-
-      const newDoc = buildFsPayload(true, tycBlock);
+      const newDoc = buildFsPayload(true);
       await fsDocRef.set(newDoc);
       createdFs = true;
     }
@@ -311,7 +291,7 @@ export default async function handler(req, res) {
       ok: true,
       auth: { uid: authUID, created: createdAuth },
       firestore: { docId: fsDocRef.id, created: createdFs },
-      tycApplied: !!tycBlock
+      tycApplied: true
     });
 
   } catch (err) {
