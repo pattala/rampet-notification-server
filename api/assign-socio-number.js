@@ -34,7 +34,30 @@ function cors(req, res) {
 }
 
 export default async function handler(req, res) {
-  if (cors(req, res)) return;
+
+   // ---- CORS: permitir orígenes del Panel y headers necesarios ----
+  const allowedOrigins = [
+    'http://127.0.0.1:5500',
+    'http://localhost:5500',
+    'https://TU-DOMINIO-DEL-PANEL',     // <-- poné tu dominio real del panel si ya está deployado
+    'https://TU-OTRO-DOMINIO-SI-CORRESPONDE'
+  ];
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Vary', 'Origin'); // para caches
+  res.setHeader('Access-Control-Allow-Credentials', 'true'); // si te hace falta cookies (no obligatorio)
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  // Asegurate de listar TODOS los headers que mandás desde el Panel
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
+
+  // Preflight (OPTIONS) debe responder sin más
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+ if (cors(req, res)) return;
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método no permitido.' });
