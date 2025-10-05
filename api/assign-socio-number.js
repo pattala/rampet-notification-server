@@ -1,6 +1,6 @@
 // api/assign-socio-number.js
-// Asigna numeroSocio de forma consistente (transacción) y mantiene el comportamiento actual.
-// ✨ Mejora: CORS con x-api-key, validación de API key y soporte de body { docId } o { uid }.
+// Asigna numeroSocio de forma consistente (transacción).
+// ✨ Envío de email de bienvenida SOLO si sendWelcome:true. Si no, no envía nada.
 
 import admin from "firebase-admin";
 
@@ -28,7 +28,6 @@ function setCors(res, origin) {
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS, GET");
-  // ✅ incluye x-api-key para evitar el “Failed to fetch” del preflight
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
 }
 
@@ -38,6 +37,16 @@ async function readJsonBody(req) {
   for await (const c of req) chunks.push(c);
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : {};
+}
+
+function buildBaseUrl(req) {
+  // Priorizar el host del request (funciona en Vercel)
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const proto = (req.headers["x-forwarded-proto"] || "https").split(",")[0];
+  if (host) return `${proto}://${host}`;
+  // Fallback a env si lo tenés configurado
+  if (process.env.SELF_BASE_URL) return process.env.SELF_BASE_URL;
+  return ""; // si queda vacío, evitamos llamar al send-email
 }
 
 export default async function handler(req, res) {
@@ -58,7 +67,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  // ✅ Validación API key (misma que create-user)
+  // Validación API key
   const clientKey = req.headers["x-api-key"];
   if (!clientKey || clientKey !== process.env.API_SECRET_KEY) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
@@ -71,7 +80,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, error: "Invalid JSON body" });
   }
 
-  const { docId, uid } = payload || {};
+  const { docId, uid, sendWelcome } = payload || {};
   if (!docId && !uid) {
     return res.status(400).json({ ok: false, error: "Falta docId o uid" });
   }
@@ -109,25 +118,46 @@ export default async function handler(req, res) {
       tx.set(clienteRef, { numeroSocio: numeroAsignado, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     });
 
-    // Mantener el comportamiento actual de email (si tu versión lo hacía siempre)
-    // Si querés hacerlo opcional más adelante, agregamos `sendWelcome: true` en el body.
-    try {
-      // Lógica de tu envío existente (placeholder opcional):
-      // await enviarEmailBienvenida({ to, variables: { numero_socio: numeroAsignado, ... } });
-    } catch (err) {
-      console.error("Error enviando email de bienvenida:", err);
-      return res.status(200).json({
-        ok: true,
-        message: "Número de socio asignado. Falló el envío de email de bienvenida.",
-        numeroSocio: numeroAsignado,
-        mail: { error: "send-email failed" }
-      });
+    // ── Enviar bienvenida SOLO si el Panel lo pidió ──────────────────
+    let mail = { attempted: false, ok: false };
+    if (sendWelcome === true) {
+      mail.attempted = true;
+      try {
+        const baseUrl = buildBaseUrl(req);
+        if (!baseUrl) throw new Error("Base URL not resolved for send-email");
+
+        // Obtener email y nombre del cliente para armar variables
+        const cli = await clienteRef.get();
+        const data = cli.data() || {};
+        const to = data.email;
+        const nombre = data.nombre || "";
+        // Llamar a tu propio endpoint de envío
+        const resp = await fetch(`${baseUrl}/api/send-email`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": process.env.API_SECRET_KEY || ""
+          },
+          body: JSON.stringify({
+            to,
+            templateId: "bienvenida",
+            variables: { nombre, numero_socio: numeroAsignado }
+          })
+        });
+        const j = await resp.json().catch(() => ({}));
+        mail.ok = resp.ok === true || resp.status >= 200 && resp.status < 300;
+        mail.response = j;
+      } catch (err) {
+        console.error("Error enviando email de bienvenida:", err);
+        mail.error = String(err?.message || err);
+      }
     }
 
     return res.status(200).json({
       ok: true,
       message: "Número de socio asignado.",
-      numeroSocio: numeroAsignado
+      numeroSocio: numeroAsignado,
+      mail
     });
 
   } catch (err) {
