@@ -40,7 +40,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Método no permitido.' });
   }
 
-  const { docId } = req.body || {};
+  const { docId, sendWelcome } = req.body || {};
   if (!docId) {
     return res.status(400).json({ error: 'Falta el ID del documento del cliente.' });
   }
@@ -98,43 +98,56 @@ export default async function handler(req, res) {
     if (!datosClienteParaEmail) {
       return res.status(200).json({ message: 'El cliente ya tenía número de socio. No se envió email.' });
     }
+// --- Enviar email de bienvenida SOLO si el Panel lo pidió ---
+if (sendWelcome === true) {
+  try {
+    const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
+    const r = await fetch(`${baseUrl}/api/send-email`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.API_SECRET_KEY}`
+      },
+      body: JSON.stringify({
+        to: datosClienteParaEmail.email,
+        templateId: 'bienvenida',
+        templateData: {
+          nombre: datosClienteParaEmail.nombre,
+          numero_socio: datosClienteParaEmail.numero_socio,
+          puntos_ganados: datosClienteParaEmail.puntos_ganados,
+          id_cliente: datosClienteParaEmail.id_cliente,
+        }
+      })
+    });
 
-    // --- Enviar email de bienvenida (server → server) ---
-    try {
-     const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
-const r = await fetch(`${baseUrl}/api/send-email`, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${process.env.API_SECRET_KEY}` // <- nombre correcto
-  },
-  body: JSON.stringify({
-    to: datosClienteParaEmail.email,
-    templateId: 'bienvenida',
-    templateData: {
-      nombre: datosClienteParaEmail.nombre,
-      numero_socio: datosClienteParaEmail.numero_socio,
-      puntos_ganados: datosClienteParaEmail.puntos_ganados,
-      id_cliente: datosClienteParaEmail.id_cliente,
-    }
-  })
-});
+    const mailResp = await r.json().catch(() => ({}));
+    return res.status(200).json({
+      ok: true,
+      message: 'Número de socio asignado y email de bienvenida enviado (o encolado).',
+      numeroSocio: datosClienteParaEmail.numero_socio,
+      emailEnviado: true,
+      mail: mailResp
+    });
+  } catch (err) {
+    console.error('Error enviando email de bienvenida:', err);
+    return res.status(200).json({
+      ok: true,
+      message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
+      numeroSocio: datosClienteParaEmail.numero_socio,
+      emailEnviado: false,
+      mail: { error: 'send-email failed' }
+    });
+  }
+} else {
+  console.log('[assign-socio-number] sendWelcome=false → no se envía email.');
+  return res.status(200).json({
+    ok: true,
+    message: 'Número de socio asignado (sin email de bienvenida por configuración).',
+    numeroSocio: datosClienteParaEmail.numero_socio,
+    emailEnviado: false
+  });
+}
 
-
-      const mailResp = await r.json().catch(() => ({}));
-      return res.status(200).json({
-        message: 'Número de socio asignado y email de bienvenida enviado (o encolado).',
-        numeroSocio: datosClienteParaEmail.numero_socio,
-        mail: mailResp
-      });
-    } catch (err) {
-      console.error('Error enviando email de bienvenida:', err);
-      return res.status(200).json({
-        message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
-        numeroSocio: datosClienteParaEmail.numero_socio,
-        mail: { error: 'send-email failed' }
-      });
-    }
 
   } catch (error) {
     console.error('Error asignando número de socio:', error);
