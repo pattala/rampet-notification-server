@@ -41,19 +41,16 @@ export default async function handler(req, res) {
     'http://localhost:5500',
     'https://TU-DOMINIO-DEL-PANEL',     // <-- si corresponde
     'https://TU-OTRO-DOMINIO-SI-CORRESPONDE',
-    // ──────────────────────────────────────────────────────────────
-    // PWA: agregado para habilitar llamadas desde la PWA en Vercel
+    // PWA
     'https://rampet.vercel.app',
-    // ──────────────────────────────────────────────────────────────
   ];
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Vary', 'Origin'); // para caches
-  res.setHeader('Access-Control-Allow-Credentials', 'true'); // si te hace falta cookies (no obligatorio)
+  res.setHeader('Access-Control-Allow-Credentials', 'true'); // si te hace falta cookies (opcional)
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  // Asegurate de listar TODOS los headers que mandás desde el Panel/PWA
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
 
   // Preflight (OPTIONS) debe responder sin más
@@ -61,23 +58,31 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // Extra: si configuraste CORS_ALLOWED_ORIGINS, también respetalo (no rompe flujo existente)
+  // Extra: si configuraste CORS_ALLOWED_ORIGINS, respetalo también
   if (cors(req, res)) return;
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método no permitido.' });
   }
 
-  // Body-safe: si llega string (algunas configs de Vercel), parseamos una vez
+  // Body-safe: si llega string (algunas configs de Vercel), parseamos
   let body = req.body;
   if (typeof body === 'string') {
     try { body = JSON.parse(body); } catch { body = {}; }
   }
 
-  const { docId, sendWelcome } = body || {};
+  let { docId, sendWelcome } = body || {};
   if (!docId) {
     return res.status(400).json({ error: 'Falta el ID del documento del cliente.' });
   }
+
+  // 🔹 REGLA NUEVA:
+  // - Si el Panel envía explícitamente sendWelcome true/false → se respeta.
+  // - Si NO lo envía, entonces:
+  //     * Desde la PWA (rampet.vercel.app) => enviamos email (true).
+  //     * Desde otros orígenes => no cambiar el comportamiento previo (false).
+  const isPwaOrigin = origin === 'https://rampet.vercel.app';
+  const shouldSendWelcome = (typeof sendWelcome === 'boolean') ? sendWelcome : isPwaOrigin;
 
   try {
     const contadorRef = db.collection('configuracion').doc('contadores');
@@ -133,8 +138,8 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'El cliente ya tenía número de socio. No se envió email.' });
     }
 
-    // --- Enviar email de bienvenida SOLO si el Panel lo pidió ---
-    if (sendWelcome === true) {
+    // --- Enviar email de bienvenida según regla shouldSendWelcome ---
+    if (shouldSendWelcome) {
       try {
         const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
         const r = await fetch(`${baseUrl}/api/send-email`, {
