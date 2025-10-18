@@ -1,4 +1,4 @@
- // /api/assign-socio-number.js  (ESM + CORS + asigna N° socio + email bienvenida)
+// /api/assign-socio-number.js  (ESM + CORS + asigna N° socio + email bienvenida)
 import admin from 'firebase-admin';
 
 // Inicializa Firebase Admin una sola vez
@@ -28,19 +28,23 @@ function cors(req, res) {
   }
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-api-key');
   if (req.method === 'OPTIONS') { res.status(204).end(); return true; }
   return false;
 }
 
 export default async function handler(req, res) {
 
-   // ---- CORS: permitir orígenes del Panel y headers necesarios ----
+  // ---- CORS: permitir orígenes del Panel y headers necesarios ----
   const allowedOrigins = [
     'http://127.0.0.1:5500',
     'http://localhost:5500',
-    'https://TU-DOMINIO-DEL-PANEL',     // <-- poné tu dominio real del panel si ya está deployado
-    'https://TU-OTRO-DOMINIO-SI-CORRESPONDE'
+    'https://TU-DOMINIO-DEL-PANEL',     // <-- si corresponde
+    'https://TU-OTRO-DOMINIO-SI-CORRESPONDE',
+    // ──────────────────────────────────────────────────────────────
+    // PWA: agregado para habilitar llamadas desde la PWA en Vercel
+    'https://rampet.vercel.app',
+    // ──────────────────────────────────────────────────────────────
   ];
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
@@ -49,7 +53,7 @@ export default async function handler(req, res) {
   res.setHeader('Vary', 'Origin'); // para caches
   res.setHeader('Access-Control-Allow-Credentials', 'true'); // si te hace falta cookies (no obligatorio)
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  // Asegurate de listar TODOS los headers que mandás desde el Panel
+  // Asegurate de listar TODOS los headers que mandás desde el Panel/PWA
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
 
   // Preflight (OPTIONS) debe responder sin más
@@ -57,13 +61,20 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
- if (cors(req, res)) return;
+  // Extra: si configuraste CORS_ALLOWED_ORIGINS, también respetalo (no rompe flujo existente)
+  if (cors(req, res)) return;
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método no permitido.' });
   }
 
-  const { docId, sendWelcome } = req.body || {};
+  // Body-safe: si llega string (algunas configs de Vercel), parseamos una vez
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { body = {}; }
+  }
+
+  const { docId, sendWelcome } = body || {};
   if (!docId) {
     return res.status(400).json({ error: 'Falta el ID del documento del cliente.' });
   }
@@ -121,56 +132,56 @@ export default async function handler(req, res) {
     if (!datosClienteParaEmail) {
       return res.status(200).json({ message: 'El cliente ya tenía número de socio. No se envió email.' });
     }
-// --- Enviar email de bienvenida SOLO si el Panel lo pidió ---
-if (sendWelcome === true) {
-  try {
-    const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
-    const r = await fetch(`${baseUrl}/api/send-email`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.API_SECRET_KEY}`
-      },
-      body: JSON.stringify({
-        to: datosClienteParaEmail.email,
-        templateId: 'bienvenida',
-        templateData: {
-          nombre: datosClienteParaEmail.nombre,
-          numero_socio: datosClienteParaEmail.numero_socio,
-          puntos_ganados: datosClienteParaEmail.puntos_ganados,
-          id_cliente: datosClienteParaEmail.id_cliente,
-        }
-      })
-    });
 
-    const mailResp = await r.json().catch(() => ({}));
-    return res.status(200).json({
-      ok: true,
-      message: 'Número de socio asignado y email de bienvenida enviado (o encolado).',
-      numeroSocio: datosClienteParaEmail.numero_socio,
-      emailEnviado: true,
-      mail: mailResp
-    });
-  } catch (err) {
-    console.error('Error enviando email de bienvenida:', err);
-    return res.status(200).json({
-      ok: true,
-      message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
-      numeroSocio: datosClienteParaEmail.numero_socio,
-      emailEnviado: false,
-      mail: { error: 'send-email failed' }
-    });
-  }
-} else {
-  console.log('[assign-socio-number] sendWelcome=false → no se envía email.');
-  return res.status(200).json({
-    ok: true,
-    message: 'Número de socio asignado (sin email de bienvenida por configuración).',
-    numeroSocio: datosClienteParaEmail.numero_socio,
-    emailEnviado: false
-  });
-}
+    // --- Enviar email de bienvenida SOLO si el Panel lo pidió ---
+    if (sendWelcome === true) {
+      try {
+        const baseUrl = process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`;
+        const r = await fetch(`${baseUrl}/api/send-email`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.API_SECRET_KEY}`
+          },
+          body: JSON.stringify({
+            to: datosClienteParaEmail.email,
+            templateId: 'bienvenida',
+            templateData: {
+              nombre: datosClienteParaEmail.nombre,
+              numero_socio: datosClienteParaEmail.numero_socio,
+              puntos_ganados: datosClienteParaEmail.puntos_ganados,
+              id_cliente: datosClienteParaEmail.id_cliente,
+            }
+          })
+        });
 
+        const mailResp = await r.json().catch(() => ({}));
+        return res.status(200).json({
+          ok: true,
+          message: 'Número de socio asignado y email de bienvenida enviado (o encolado).',
+          numeroSocio: datosClienteParaEmail.numero_socio,
+          emailEnviado: true,
+          mail: mailResp
+        });
+      } catch (err) {
+        console.error('Error enviando email de bienvenida:', err);
+        return res.status(200).json({
+          ok: true,
+          message: 'Número de socio asignado. Falló el envío de email de bienvenida.',
+          numeroSocio: datosClienteParaEmail.numero_socio,
+          emailEnviado: false,
+          mail: { error: 'send-email failed' }
+        });
+      }
+    } else {
+      console.log('[assign-socio-number] sendWelcome=false → no se envía email.');
+      return res.status(200).json({
+        ok: true,
+        message: 'Número de socio asignado (sin email de bienvenida por configuración).',
+        numeroSocio: datosClienteParaEmail.numero_socio,
+        emailEnviado: false
+      });
+    }
 
   } catch (error) {
     console.error('Error asignando número de socio:', error);
