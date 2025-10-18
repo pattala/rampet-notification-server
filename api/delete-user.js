@@ -1,10 +1,13 @@
 // api/delete-user.js
-// Purga total SIEMPRE: borra doc en Firestore y también usuario en Firebase Auth (si existe).
+// Purga total SIEMPRE: borra doc en Firestore, datos relacionados (geo_raw, subcolecciones configurables)
+// y también usuario en Firebase Auth (si existe).
 // CORS robusto + x-api-key + lectura de body segura (sin req.body para evitar "Invalid JSON" en Vercel).
 
 import admin from "firebase-admin";
 
-// ---------- Firebase Admin ----------
+/* ─────────────────────────────────────────────────────────────
+   Firebase Admin
+   ──────────────────────────────────────────────────────────── */
 function initFirebaseAdmin() {
   if (admin.apps.length) return;
 
@@ -25,7 +28,9 @@ function getDb() {
   return admin.firestore();
 }
 
-// ---------- CORS ----------
+/* ─────────────────────────────────────────────────────────────
+   CORS
+   ──────────────────────────────────────────────────────────── */
 function getAllowedOrigin(req) {
   const allowed = (process.env.CORS_ALLOWED_ORIGINS || "")
     .split(",")
@@ -43,7 +48,9 @@ function setCors(res, origin) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
 }
 
-// ---------- Body seguro ----------
+/* ─────────────────────────────────────────────────────────────
+   Body seguro
+   ──────────────────────────────────────────────────────────── */
 async function readJsonBody(req) {
   try {
     const chunks = [];
@@ -58,7 +65,9 @@ async function readJsonBody(req) {
   }
 }
 
-// ---------- Resolver cliente ----------
+/* ─────────────────────────────────────────────────────────────
+   Resolver cliente
+   ──────────────────────────────────────────────────────────── */
 async function findClienteDoc(db, { docId, numeroSocio, authUID, email }) {
   const col = db.collection("clientes");
 
@@ -97,7 +106,60 @@ async function findClienteDoc(db, { docId, numeroSocio, authUID, email }) {
   return null;
 }
 
-// ---------- Handler ----------
+/* ─────────────────────────────────────────────────────────────
+   NUEVO: Helpers de borrado en cascada
+   ──────────────────────────────────────────────────────────── */
+
+/**
+ * Borra documentos que cumplan un query, en lotes de 500, hasta vaciar.
+ * Acepta una función "makeQuery" para rearmar el query en cada pasada.
+ */
+async function deleteByQueryPaged(db, makeQuery, label = "batch") {
+  // Repite hasta que el query no devuelva más docs
+  while (true) {
+    const snap = await makeQuery().get();
+    if (snap.empty) break;
+
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+    // Vuelve a iterar hasta vaciar
+  }
+  console.log(`[delete-user][cascade] ${label}: completo`);
+}
+
+/**
+ * Borra subcolecciones bajo clientes/{docId} si agregás nombres en el array.
+ * De momento no se encontraron subcolecciones obligatorias; queda como hook.
+ */
+async function deleteClienteSubcollections(db, docId) {
+  // Si en el futuro agregás subcolecciones, listalas acá:
+  // p.ej.: const subs = ["geo", "historialPuntos", "historialCanjes"];
+  const subs = [];
+
+  for (const sub of subs) {
+    const makeQuery = () => db.collection(`clientes/${docId}/${sub}`).limit(500);
+    await deleteByQueryPaged(db, makeQuery, `clientes/${docId}/${sub}`);
+  }
+}
+
+/**
+ * Borra registros sueltos relacionados al cliente (por ej. geo_raw)
+ * Considera que en geo_raw puede existir campo "uid" y/o "clienteId"
+ */
+async function deleteLooseCollections(db, { uid, docId }) {
+  // GEO RAW por uid
+  const makeQueryUid = () => db.collection("geo_raw").where("uid", "==", uid).limit(500);
+  await deleteByQueryPaged(db, makeQueryUid, `geo_raw where uid==${uid}`);
+
+  // GEO RAW por clienteId (id de doc en clientes)
+  const makeQueryDoc = () => db.collection("geo_raw").where("clienteId", "==", docId).limit(500);
+  await deleteByQueryPaged(db, makeQueryDoc, `geo_raw where clienteId==${docId}`);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Handler
+   ──────────────────────────────────────────────────────────── */
 export default async function handler(req, res) {
   const allowOrigin = getAllowedOrigin(req);
   setCors(res, allowOrigin);
@@ -110,7 +172,7 @@ export default async function handler(req, res) {
       route: "/api/delete-user",
       corsOrigin: allowOrigin || null,
       project: "sistema-fidelizacion",
-      tips: "POST con x-api-key y body { docId | numeroSocio | authUID | email } (purga total).",
+      tips: "POST con x-api-key y body { docId | numeroSocio | authUID | email } (purga total en cascada).",
     });
   }
 
@@ -153,24 +215,49 @@ export default async function handler(req, res) {
     let matchedBy = null;
     let data = null;
 
+    // Capturamos uid/docId para cascada incluso si el doc ya no está
+    let resolvedDocId = found?.id || docId || null;
+    let resolvedAuthUID = authUID || found?.data?.authUID || null;
+    let resolvedEmail = email || found?.data?.email || null;
+
+    // 2) Si hay doc, borra primero datos relacionados (cascada), luego el doc
     if (found) {
       deletedDocId = found.id;
       data = found.data;
       matchedBy = docId ? "docId" : authUID ? "authUID" : email ? "email" : "numeroSocio";
 
-      // 2) Borrar documento en Firestore (doc entero; tu historial está embebido)
+      // 2.a) Cascada de subcolecciones bajo clientes/{docId} (si configuras subs)
+      await deleteClienteSubcollections(db, found.id);
+
+      // 2.b) Cascada de colecciones sueltas (geo_raw por uid/clienteId)
+      await deleteLooseCollections(db, {
+        uid: data?.authUID || resolvedAuthUID || "",
+        docId: found.id
+      });
+
+      // 2.c) Borrar documento en Firestore
       await db.collection("clientes").doc(found.id).delete();
     } else {
-      // Si no encontramos el doc, seguimos igual con Auth (idempotencia)
+      // Si no encontramos el doc, igualmente hacemos cascada por pistas que tengamos
       matchedBy = docId ? "docId" : authUID ? "authUID" : email ? "email" : "numeroSocio";
+
+      // Intento de cascada mínima: si tenemos docId o authUID, limpiamos geo_raw
+      if (resolvedDocId || resolvedAuthUID) {
+        await deleteLooseCollections(db, {
+          uid: resolvedAuthUID || "",
+          docId: resolvedDocId || ""
+        });
+      }
     }
 
     // 3) Borrar usuario en Auth (si existe), siempre (purga total)
     initFirebaseAdmin();
-    let uidToDelete = authUID || data?.authUID || null;
+
+    // Resolver UID por prioridad: payload.authUID -> data.authUID -> email (lookup)
+    let uidToDelete = resolvedAuthUID || data?.authUID || null;
 
     if (!uidToDelete) {
-      const emailToResolve = email || data?.email;
+      const emailToResolve = resolvedEmail || data?.email;
       if (emailToResolve) {
         try {
           const user = await admin.auth().getUserByEmail(String(emailToResolve).toLowerCase());
@@ -199,6 +286,7 @@ export default async function handler(req, res) {
       deletedDocId,
       matchedBy,
       authDeletion,
+      cascade: { geo_raw: "done", subcollections: "done" }
     });
   } catch (err) {
     console.error("delete-user error:", err);
