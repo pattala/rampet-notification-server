@@ -135,7 +135,7 @@ async function deleteByQueryPaged(db, makeQuery, label = "batch") {
 async function deleteClienteSubcollections(db, docId) {
   // Si en el futuro agregás subcolecciones, listalas acá:
   // p.ej.: const subs = ["geo", "historialPuntos", "historialCanjes"];
-  const subs = [];
+  const subs = ["geo_raw"];
 
   for (const sub of subs) {
     const makeQuery = () => db.collection(`clientes/${docId}/${sub}`).limit(500);
